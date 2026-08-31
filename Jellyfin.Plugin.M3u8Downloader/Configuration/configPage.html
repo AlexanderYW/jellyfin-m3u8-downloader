@@ -1,0 +1,1313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>M3U8 Downloader</title>
+</head>
+<body>
+<div id="M3u8DownloaderConfigPage" data-role="page" class="page type-interior pluginConfigurationPage"
+     data-require="emby-input,emby-button,emby-checkbox,emby-select,emby-textarea,emby-linkbutton,emby-collapse">
+
+    <style>
+        /* Scoped to the page id so nothing here can leak into the rest of the dashboard.
+           Colours come from the active theme's variables, with fallbacks, so the page follows
+           whichever theme the admin is using instead of pinning one palette. */
+        #M3u8DownloaderConfigPage .m3uTabs {
+            margin-bottom: 1.5em;
+        }
+
+        #M3u8DownloaderConfigPage .m3uTabs a.ui-btn-active {
+            border-bottom: 0.15em solid var(--theme-primary-color, #00a4dc);
+        }
+
+        #M3u8DownloaderConfigPage .m3uBanner {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.75em;
+            padding: 0.9em 1.1em;
+            margin-bottom: 1.5em;
+            border-radius: 0.3em;
+            border-left: 0.25em solid #cc3d3d;
+            background: rgba(204, 61, 61, 0.12);
+        }
+
+        #M3u8DownloaderConfigPage .m3uBanner .material-icons {
+            color: #cc3d3d;
+        }
+
+        #M3u8DownloaderConfigPage .m3uBannerText {
+            flex: 1 1 15em;
+        }
+
+        /* Paused is a state the admin chose, not a fault, so it is not painted like the error. */
+        #M3u8DownloaderConfigPage .m3uBanner.m3uBannerInfo {
+            border-left-color: var(--theme-primary-color, #00a4dc);
+            background: rgba(0, 164, 220, 0.12);
+        }
+
+        #M3u8DownloaderConfigPage .m3uBanner.m3uBannerInfo .material-icons {
+            color: var(--theme-primary-color, #00a4dc);
+        }
+
+        #M3u8DownloaderConfigPage .m3uCard {
+            padding: 0.9em 1.1em;
+            margin-bottom: 1.5em;
+            border-radius: 0.3em;
+            border-left: 0.25em solid #d8a13a;
+            background: rgba(216, 161, 58, 0.12);
+        }
+
+        #M3u8DownloaderConfigPage .m3uCardHeader {
+            display: flex;
+            align-items: center;
+            gap: 0.5em;
+        }
+
+        #M3u8DownloaderConfigPage .m3uCardHeader h3 {
+            margin: 0;
+            flex: 1;
+        }
+
+        #M3u8DownloaderConfigPage .m3uCard ul {
+            margin: 0.6em 0 0;
+            padding-left: 1.2em;
+        }
+
+        #M3u8DownloaderConfigPage .m3uCard li {
+            margin-bottom: 0.35em;
+        }
+
+        #M3u8DownloaderConfigPage .m3uCard code {
+            overflow-wrap: anywhere;
+        }
+
+        #M3u8DownloaderConfigPage .m3uSectionTitle {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 0.75em;
+            margin: 2em 0 0.5em;
+        }
+
+        #M3u8DownloaderConfigPage .m3uSectionTitle h2 {
+            margin: 0;
+        }
+
+        #M3u8DownloaderConfigPage .m3uCounts {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4em;
+        }
+
+        #M3u8DownloaderConfigPage .m3uChip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35em;
+            padding: 0.15em 0.7em;
+            border-radius: 1em;
+            font-size: 0.85em;
+            background: rgba(127, 127, 127, 0.22);
+        }
+
+        #M3u8DownloaderConfigPage .m3uChip .m3uDot {
+            width: 0.55em;
+            height: 0.55em;
+            border-radius: 50%;
+            background: currentColor;
+        }
+
+        #M3u8DownloaderConfigPage .m3uQueueBar {
+            display: flex;
+            align-items: flex-end;
+            flex-wrap: wrap;
+            gap: 0.6em;
+            margin-bottom: 0.75em;
+        }
+
+        #M3u8DownloaderConfigPage .m3uQueueBar .m3uFilter {
+            flex: 0 1 14em;
+            margin-right: auto;
+        }
+
+        #M3u8DownloaderConfigPage .m3uEmpty {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            gap: 0.4em;
+            padding: 2.5em 1em;
+            opacity: 0.7;
+        }
+
+        #M3u8DownloaderConfigPage .m3uEmpty .material-icons {
+            font-size: 3em;
+        }
+
+        #M3u8DownloaderConfigPage .m3uJob {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.9em;
+            padding: 0.85em 0.9em;
+        }
+
+        #M3u8DownloaderConfigPage .m3uJobIcon {
+            flex: 0 0 auto;
+            margin-top: 0.1em;
+        }
+
+        #M3u8DownloaderConfigPage .m3uJobBody {
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+
+        #M3u8DownloaderConfigPage .m3uJobTitle {
+            font-weight: 500;
+            overflow-wrap: anywhere;
+        }
+
+        #M3u8DownloaderConfigPage .m3uJobMeta {
+            margin-top: 0.15em;
+            overflow-wrap: anywhere;
+        }
+
+        #M3u8DownloaderConfigPage .m3uProgress {
+            display: none;
+            position: relative;
+            overflow: hidden;
+            height: 0.35em;
+            margin-top: 0.5em;
+            border-radius: 0.2em;
+            background: rgba(127, 127, 127, 0.3);
+        }
+
+        #M3u8DownloaderConfigPage .m3uJob.is-downloading .m3uProgress {
+            display: block;
+        }
+
+        #M3u8DownloaderConfigPage .m3uProgressInner {
+            height: 100%;
+            width: 0;
+            border-radius: inherit;
+            background: var(--theme-primary-color, #00a4dc);
+            transition: width 0.4s linear;
+        }
+
+        /* ffmpeg does not always report a duration, so there is no percentage to draw. Rather than
+           show a bar stuck at zero, the bar sweeps to say "working, length unknown". */
+        #M3u8DownloaderConfigPage .m3uProgress.indeterminate .m3uProgressInner {
+            width: 35%;
+            transition: none;
+            animation: m3uSweep 1.4s ease-in-out infinite;
+        }
+
+        @keyframes m3uSweep {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(300%); }
+        }
+
+        #M3u8DownloaderConfigPage .m3uJobPath {
+            display: none;
+            margin-top: 0.25em;
+            font-family: monospace;
+            font-size: 0.85em;
+            opacity: 0.75;
+            overflow-wrap: anywhere;
+            user-select: text;
+        }
+
+        #M3u8DownloaderConfigPage .m3uJobError {
+            display: none;
+            max-height: 9em;
+            overflow: auto;
+            margin-top: 0.5em;
+            padding: 0.5em 0.65em;
+            border-radius: 0.25em;
+            background: rgba(127, 127, 127, 0.16);
+            font-family: monospace;
+            font-size: 0.85em;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            user-select: text;
+        }
+
+        #M3u8DownloaderConfigPage .m3uJobActions {
+            display: flex;
+            flex: 0 0 auto;
+            gap: 0.15em;
+        }
+
+        #M3u8DownloaderConfigPage .m3uStatusQueued { color: var(--theme-text-color, #fff); opacity: 0.6; }
+        #M3u8DownloaderConfigPage .m3uStatusDownloading { color: var(--theme-primary-color, #00a4dc); }
+        #M3u8DownloaderConfigPage .m3uStatusCompleted { color: #4caf50; }
+        #M3u8DownloaderConfigPage .m3uStatusFailed { color: #cc3d3d; }
+        #M3u8DownloaderConfigPage .m3uStatusCanceled { color: var(--theme-text-color, #fff); opacity: 0.5; }
+
+        /* Narrow screens keep the single-row shape -- wrapping the body below the icon strands
+           the status glyph on a line of its own, far from the name it describes. There is room
+           because the title and the error block already wrap on their own. */
+        @media (max-width: 40em) {
+            #M3u8DownloaderConfigPage .m3uJob {
+                gap: 0.5em;
+                padding: 0.85em 0.4em;
+            }
+
+            #M3u8DownloaderConfigPage .m3uQueueBar .m3uFilter {
+                flex-basis: 100%;
+            }
+        }
+    </style>
+
+    <div data-role="content">
+        <div class="content-primary">
+
+            <div class="localnav m3uTabs">
+                <a href="#" is="emby-linkbutton" class="ui-btn-active" data-tab="downloads"><span>Downloads</span></a>
+                <a href="#" is="emby-linkbutton" data-tab="settings"><span>Settings</span></a>
+            </div>
+
+            <!-- ============================ Downloads ============================ -->
+            <div class="m3uTabContent" data-tab-content="downloads">
+
+                <div class="m3uBanner" id="NoOutputDirBanner" style="display:none;">
+                    <span class="material-icons" aria-hidden="true">error_outline</span>
+                    <div class="m3uBannerText">
+                        No output directory is set. Downloads will sit in the queue until one is
+                        configured.
+                    </div>
+                    <button is="emby-button" type="button" id="GoToSettingsButton" class="raised">
+                        <span>Open settings</span>
+                    </button>
+                </div>
+
+                <div class="m3uBanner m3uBannerInfo" id="PausedBanner" style="display:none;">
+                    <span class="material-icons" aria-hidden="true">pause_circle_outline</span>
+                    <div class="m3uBannerText">
+                        The queue is paused. Nothing new will start until you resume it; anything
+                        already downloading runs to the end.
+                    </div>
+                </div>
+
+                <h2>Add downloads</h2>
+
+                <div class="inputContainer">
+                    <input is="emby-input" type="text" id="DestinationFolder" label="Destination folder (optional)" />
+                    <div class="fieldDescription">
+                        Relative to the output directory, applied to every line below &mdash; for example
+                        <code>Shows/Breaking Bad/Season 01</code>. Leave blank to write straight into the
+                        output directory.
+                    </div>
+                </div>
+
+                <div class="inputContainer">
+                    <textarea is="emby-textarea" id="BulkInput" rows="8" class="emby-textarea"
+                              label="One download per line"
+                              placeholder="https://example.com/stream.m3u8 | My Show S01E01&#10;https://example.com/other.m3u8"></textarea>
+                </div>
+
+                <div is="emby-collapse" title="Line format">
+                    <div class="collapseContent">
+                        <div class="fieldDescription">
+                            Each line is <code>URL | filename</code>. The filename is optional and the
+                            <code>.mkv</code> extension is added automatically. Subfolders are allowed
+                            (<code>Show/Season 01/S01E01</code>). Lines starting with <code>#</code> are
+                            ignored, so you can keep notes in the list.
+                        </div>
+                    </div>
+                </div>
+
+                <div>
+                    <button is="emby-button" type="button" id="AddJobsButton" class="raised button-submit block" disabled>
+                        <span>Add to queue</span>
+                    </button>
+                </div>
+
+                <div class="m3uCard" id="RejectedLines" style="display:none;"></div>
+
+                <div class="m3uSectionTitle">
+                    <h2>Queue</h2>
+                    <div class="m3uCounts" id="QueueCounts" aria-live="polite"></div>
+                </div>
+
+                <div class="m3uQueueBar">
+                    <div class="selectContainer m3uFilter">
+                        <select is="emby-select" id="QueueFilter" label="Show">
+                            <option value="all">All</option>
+                            <option value="active">Active</option>
+                            <option value="failed">Failed</option>
+                            <option value="completed">Completed</option>
+                        </select>
+                    </div>
+                    <button is="emby-button" type="button" id="PauseQueueButton" class="raised">
+                        <span>Pause queue</span>
+                    </button>
+                    <button is="emby-button" type="button" id="RetryFailedButton" class="raised" disabled>
+                        <span>Retry all failed</span>
+                    </button>
+                    <button is="emby-button" type="button" id="ClearFinishedButton" class="raised" disabled>
+                        <span>Clear finished</span>
+                    </button>
+                </div>
+
+                <div class="paperList" id="QueueList"></div>
+
+                <div class="m3uEmpty" id="QueueEmpty" style="display:none;">
+                    <span class="material-icons" aria-hidden="true">inbox</span>
+                    <div>Nothing in the queue</div>
+                    <div class="fieldDescription">Paste one or more stream URLs above to get started.</div>
+                </div>
+
+                <div class="m3uEmpty" id="QueueFiltered" style="display:none;">
+                    <span class="material-icons" aria-hidden="true">filter_alt</span>
+                    <div>No downloads match this filter</div>
+                </div>
+            </div>
+
+            <!-- ============================ Settings ============================ -->
+            <div class="m3uTabContent" data-tab-content="settings" style="display:none;">
+                <form id="M3u8DownloaderConfigForm">
+                    <div class="inputContainer">
+                        <input is="emby-input" type="text" id="OutputDirectory" label="Output directory" required />
+                        <div class="fieldDescription">
+                            Absolute path on the server where downloads are written. Files are always
+                            saved as <code>.mkv</code>.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="MaxConcurrentDownloads" label="Simultaneous downloads" min="1" max="8" step="1" />
+                        <div class="fieldDescription">
+                            How many downloads may run at once. Each one is a separate ffmpeg process
+                            writing to the same disk, so higher is not always faster.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="MaxDurationMinutes" label="Maximum length (minutes)" min="0" max="10080" step="1" />
+                        <div class="fieldDescription">
+                            Stops a download once it has recorded this much. Applies only to streams
+                            whose length cannot be determined &mdash; live streams, which never end on
+                            their own. <code>0</code> means no limit.
+                        </div>
+                    </div>
+
+                    <label class="checkboxContainer">
+                        <input is="emby-checkbox" type="checkbox" id="LimitLengthOnAllDownloads" />
+                        <span>Apply the maximum length to every download</span>
+                    </label>
+                    <div class="fieldDescription checkboxFieldDescription">
+                        Off by default, so a film whose length ffmpeg could measure is never cut
+                        short. Turn it on to cap every download, however long the source is.
+                    </div>
+
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="HistoryRetentionDays" label="Keep finished jobs for (days)" min="0" max="3650" step="1" />
+                        <div class="fieldDescription">
+                            Finished, failed and cancelled entries older than this are dropped from the
+                            list automatically. <code>0</code> keeps them until you clear them yourself.
+                            Downloaded files are never deleted.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="MaxRetries" label="Max retries" min="0" max="20" step="1" />
+                        <div class="fieldDescription">How many times to retry a failed download before giving up.</div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="RetryDelaySeconds" label="Retry delay (seconds)" min="0" max="3600" step="1" />
+                    </div>
+
+                    <label class="checkboxContainer">
+                        <input is="emby-checkbox" type="checkbox" id="ScanLibraryAfterDownload" />
+                        <span>Notify the library after each download</span>
+                    </label>
+
+                    <div is="emby-collapse" title="Advanced">
+                        <div class="collapseContent">
+                            <div class="inputContainer">
+                                <input is="emby-input" type="number" id="StallTimeoutMinutes" label="Stall timeout (minutes)" min="0" max="1440" step="1" />
+                                <div class="fieldDescription">
+                                    Stop a download that has made no progress at all for this long, and retry it.
+                                    A silent host is otherwise reconnected to indefinitely, holding its queue slot.
+                                    0 disables the check.
+                                </div>
+                            </div>
+
+                            <div class="inputContainer">
+                                <input is="emby-input" type="text" id="UserAgent" label="User-Agent (optional)" />
+                                <div class="fieldDescription">Leave blank to use ffmpeg's default.</div>
+                            </div>
+
+                            <div class="inputContainer">
+                                <input is="emby-input" type="text" id="Referer" label="Referer (optional)" />
+                                <div class="fieldDescription">Some hosts reject requests without a matching Referer.</div>
+                            </div>
+
+                            <div class="inputContainer">
+                                <input is="emby-input" type="text" id="ExtraInputArgs" label="Extra ffmpeg input arguments (optional)" />
+                                <div class="fieldDescription">
+                                    Placed before <code>-i</code>. Options such as <code>-reconnect</code> or
+                                    <code>-http_persistent</code> only work here, not below.
+                                </div>
+                            </div>
+
+                            <div class="inputContainer">
+                                <input is="emby-input" type="text" id="ExtraFfmpegArgs" label="Extra ffmpeg output arguments (optional)" />
+                                <div class="fieldDescription">
+                                    Inserted before the output path. Quote values containing spaces.
+                                </div>
+                            </div>
+
+                            <label class="checkboxContainer">
+                                <input is="emby-checkbox" type="checkbox" id="ReuseHttpConnections" />
+                                <span>Reuse HTTP connections between segments</span>
+                            </label>
+                            <div class="fieldDescription" style="margin-bottom:1em;">
+                                Leave off unless downloads are slow. Many CDNs rotate the hostname per segment,
+                                and reusing a connection across them causes
+                                <code>Cannot reuse HTTP connection for different host</code> and truncated downloads.
+                            </div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block">
+                            <span>Save</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        (function () {
+            var pluginId = '6f0f4a1e-6c4e-4d2a-9f3b-1c8a5d7e2b40';
+            var basePath = 'Plugins/M3u8Downloader';
+            var FAST_POLL_MS = 2000;
+            var IDLE_POLL_MS = 10000;
+            var TAB_KEY = 'm3u8downloader.tab';
+            var FILTER_KEY = 'm3u8downloader.filter';
+            var FOLDER_KEY = 'm3u8downloader.folder';
+
+            var page = document.querySelector('#M3u8DownloaderConfigPage');
+            var pollTimer = null;
+            var rows = Object.create(null);
+            var filter = 'all';
+
+            // The last configuration read from the server. The queue view needs two settings from
+            // it -- whether the queue is paused, and the length cap a live stream is measured
+            // against -- and both are already on the page's own config load.
+            var settings = {};
+
+            var STATUS_ICONS = {
+                Queued: 'schedule',
+                Downloading: 'file_download',
+                Completed: 'check_circle',
+                Failed: 'error',
+                Canceled: 'cancel'
+            };
+
+            function apiUrl(path) {
+                return ApiClient.getUrl(basePath + path);
+            }
+
+            // sessionStorage is unavailable in some embedded/private contexts and throws on
+            // access rather than returning null, so every use is guarded.
+            function readStored(key, fallback) {
+                try {
+                    return sessionStorage.getItem(key) || fallback;
+                } catch (e) {
+                    return fallback;
+                }
+            }
+
+            function writeStored(key, value) {
+                try {
+                    sessionStorage.setItem(key, value);
+                } catch (e) {
+                    // Preference only; losing it is not worth surfacing.
+                }
+            }
+
+            function toast(message) {
+                if (window.Dashboard && Dashboard.alert) {
+                    Dashboard.alert({ message: message });
+                }
+            }
+
+            function confirmAction(message, title) {
+                if (window.Dashboard && Dashboard.confirm) {
+                    return new Promise(function (resolve) {
+                        Dashboard.confirm(message, title, function (ok) {
+                            resolve(!!ok);
+                        });
+                    });
+                }
+                return Promise.resolve(window.confirm(message));
+            }
+
+            function copyText(text) {
+                if (navigator.clipboard && window.isSecureContext) {
+                    return navigator.clipboard.writeText(text);
+                }
+                // Jellyfin is commonly served over plain HTTP on a LAN, where the async clipboard
+                // API is not exposed at all. The textarea trick still works there.
+                return new Promise(function (resolve, reject) {
+                    var scratch = document.createElement('textarea');
+                    scratch.value = text;
+                    scratch.setAttribute('readonly', '');
+                    scratch.style.position = 'fixed';
+                    scratch.style.opacity = '0';
+                    document.body.appendChild(scratch);
+                    scratch.select();
+                    var ok = false;
+                    try {
+                        ok = document.execCommand('copy');
+                    } catch (e) {
+                        ok = false;
+                    }
+                    document.body.removeChild(scratch);
+                    ok ? resolve() : reject(new Error('copy failed'));
+                });
+            }
+
+            function formatDuration(seconds) {
+                if (!seconds || seconds <= 0) {
+                    return '';
+                }
+                var total = Math.floor(seconds);
+                var h = Math.floor(total / 3600);
+                var m = Math.floor((total % 3600) / 60);
+                var sec = total % 60;
+                return (h > 0 ? h + ':' + String(m).padStart(2, '0') : String(m))
+                    + ':' + String(sec).padStart(2, '0');
+            }
+
+            // ffmpeg reports how fast it is running relative to real time, which is the only
+            // honest basis for an estimate here: a remux is bounded by the source's bitrate and the
+            // network, not by anything the queue can see.
+            function formatEta(job) {
+                if (!job.SpeedRatio || job.SpeedRatio <= 0) {
+                    return '';
+                }
+                var total = cappedDuration(job);
+                if (!total || total <= job.PositionSeconds) {
+                    return '';
+                }
+                var seconds = (total - job.PositionSeconds) / job.SpeedRatio;
+                return seconds > 0 ? formatDuration(seconds) + ' left' : '';
+            }
+
+            // What the progress bar is measured against. A live stream has no duration, so the
+            // recording cap is the only end in sight -- and when there is no cap either, there is
+            // genuinely nothing to measure against.
+            function cappedDuration(job) {
+                if (job.DurationSeconds) {
+                    return job.DurationSeconds;
+                }
+                var capMinutes = settings.MaxDurationMinutes || 0;
+                return capMinutes > 0 ? capMinutes * 60 : 0;
+            }
+
+            function jobPercent(job) {
+                if (job.ProgressPercent !== null && job.ProgressPercent !== undefined) {
+                    return job.ProgressPercent;
+                }
+                var total = cappedDuration(job);
+                return total > 0 ? Math.max(0, Math.min(100, job.PositionSeconds / total * 100)) : null;
+            }
+
+            function describeJob(job) {
+                var parts = [job.Status];
+                if (job.Status === 'Downloading') {
+                    var percent = jobPercent(job);
+                    if (percent !== null) {
+                        parts.push(percent.toFixed(1) + '%');
+                        parts.push(formatDuration(job.PositionSeconds)
+                            + ' / ' + formatDuration(cappedDuration(job))
+                            + (job.DurationSeconds ? '' : ' limit'));
+                    } else {
+                        parts.push(formatDuration(job.PositionSeconds) + ' downloaded');
+                    }
+                    if (job.SpeedRatio) {
+                        parts.push(job.SpeedRatio.toFixed(1) + 'x');
+                    }
+                    var eta = formatEta(job);
+                    if (eta) {
+                        parts.push(eta);
+                    }
+                } else if (job.Status === 'Completed') {
+                    var length = formatDuration(job.DurationSeconds || job.PositionSeconds);
+                    if (length) {
+                        parts.push(length);
+                    }
+                }
+                if (job.Attempts > 1) {
+                    parts.push(job.Attempts + ' attempts');
+                }
+                return parts.join(' \u00b7 ');
+            }
+
+            function displayName(job) {
+                if (job.FileName) {
+                    return job.FileName;
+                }
+                // Nameless jobs take the filename from the URL server-side, but the queue can show
+                // them before that happens; the bare URL beats an empty row.
+                return job.Url;
+            }
+
+            function isActive(job) {
+                return job.Status === 'Queued' || job.Status === 'Downloading';
+            }
+
+            function isRetryable(job) {
+                return job.Status === 'Failed' || job.Status === 'Canceled';
+            }
+
+            function isFinished(job) {
+                return job.Status === 'Completed' || isRetryable(job);
+            }
+
+            // Running first, then pending in the order they will actually run, then history
+            // newest-first. Sorting pending jobs by queue position rather than age is what makes
+            // "download this next" visibly do something.
+            var STATUS_RANK = { Downloading: 0, Queued: 1 };
+
+            function byRunOrder(a, b) {
+                var ra = STATUS_RANK[a.Status];
+                var rb = STATUS_RANK[b.Status];
+                if (ra === undefined) { ra = 2; }
+                if (rb === undefined) { rb = 2; }
+                if (ra !== rb) {
+                    return ra - rb;
+                }
+                if (ra === 2) {
+                    return new Date(b.CreatedUtc) - new Date(a.CreatedUtc);
+                }
+                return a.QueuePosition - b.QueuePosition;
+            }
+
+            function matchesFilter(job) {
+                switch (filter) {
+                    case 'active': return isActive(job);
+                    case 'failed': return isRetryable(job);
+                    case 'completed': return job.Status === 'Completed';
+                    default: return true;
+                }
+            }
+
+            function iconButton(icon, label, cssClass, job) {
+                var b = document.createElement('button');
+                b.setAttribute('is', 'paper-icon-button-light');
+                b.setAttribute('type', 'button');
+                b.className = cssClass;
+                b.setAttribute('data-id', job.Id);
+                b.setAttribute('title', label);
+                b.setAttribute('aria-label', label);
+                var i = document.createElement('span');
+                i.className = 'material-icons';
+                i.setAttribute('aria-hidden', 'true');
+                i.textContent = icon;
+                b.appendChild(i);
+                return b;
+            }
+
+            function buildActions(container, job) {
+                container.innerHTML = '';
+                container.appendChild(iconButton('link', 'Copy source URL', 'btnCopyUrl', job));
+
+                // Only a running download can be cancelled, and cancelling is all that can be done
+                // to one. Anything else is either waiting -- so it can be reordered -- or finished.
+                if (job.Status === 'Downloading') {
+                    container.appendChild(iconButton('close', 'Cancel', 'btnCancel', job));
+                    return;
+                }
+
+                if (job.Status === 'Queued') {
+                    container.appendChild(iconButton('vertical_align_top', 'Download this next', 'btnMoveTop', job));
+                    container.appendChild(iconButton('vertical_align_bottom', 'Download this last', 'btnMoveBottom', job));
+                }
+
+                if (job.Status === 'Completed' && job.ResolvedPath) {
+                    container.appendChild(iconButton('content_copy', 'Copy output path', 'btnCopyPath', job));
+                }
+
+                if (isRetryable(job)) {
+                    container.appendChild(iconButton('refresh', 'Retry', 'btnRetry', job));
+                }
+
+                container.appendChild(iconButton('delete', 'Remove from list', 'btnRemove', job));
+            }
+
+            function createRow() {
+                var el = document.createElement('div');
+                el.className = 'listItem m3uJob';
+                // Static skeleton only -- every piece of job data is written through textContent
+                // below, never interpolated into markup.
+                el.innerHTML =
+                    '<span class="material-icons m3uJobIcon" aria-hidden="true"></span>'
+                    + '<div class="listItemBody m3uJobBody">'
+                    + '<div class="listItemBodyText m3uJobTitle"></div>'
+                    + '<div class="listItemBodyText secondary m3uJobMeta"></div>'
+                    + '<div class="m3uProgress"><div class="m3uProgressInner"></div></div>'
+                    + '<div class="m3uJobPath"></div>'
+                    + '<div class="m3uJobError"></div>'
+                    + '</div>'
+                    + '<div class="m3uJobActions"></div>';
+
+                return {
+                    el: el,
+                    icon: el.querySelector('.m3uJobIcon'),
+                    title: el.querySelector('.m3uJobTitle'),
+                    meta: el.querySelector('.m3uJobMeta'),
+                    progress: el.querySelector('.m3uProgress'),
+                    bar: el.querySelector('.m3uProgressInner'),
+                    path: el.querySelector('.m3uJobPath'),
+                    error: el.querySelector('.m3uJobError'),
+                    actions: el.querySelector('.m3uJobActions'),
+                    status: null
+                };
+            }
+
+            // Cells are updated in place rather than by rebuilding the list. Replacing innerHTML on
+            // every poll would destroy the action buttons mid-click and wipe any text the user was
+            // selecting -- which matters most for the error block, the one thing people actually
+            // want to copy out of this page.
+            function setText(node, value) {
+                var text = value === null || value === undefined ? '' : String(value);
+                if (node.textContent !== text) {
+                    node.textContent = text;
+                }
+            }
+
+            function updateRow(row, job) {
+                setText(row.title, displayName(job));
+                row.title.setAttribute('title', job.Url);
+                setText(row.meta, describeJob(job));
+
+                // Only a finished download has landed anywhere; a queued job's name is already the
+                // title, so repeating it would just be noise.
+                var path = job.Status === 'Completed' ? (job.ResolvedPath || '') : '';
+                setText(row.path, path);
+                row.path.style.display = path ? 'block' : 'none';
+
+                var error = job.LastError || '';
+                setText(row.error, error);
+                row.error.style.display = error ? 'block' : 'none';
+
+                if (job.Status === 'Downloading') {
+                    var percent = jobPercent(job);
+                    row.progress.classList.toggle('indeterminate', percent === null);
+                    row.bar.style.width = percent === null ? '' : percent + '%';
+                }
+
+                // Only the status decides the icon and which buttons apply, so leave them alone
+                // otherwise.
+                if (row.status !== job.Status) {
+                    row.status = job.Status;
+                    row.el.className = 'listItem m3uJob'
+                        + (job.Status === 'Downloading' ? ' is-downloading' : '');
+                    if (job.Status !== 'Downloading') {
+                        // Stop the sweep animation instead of leaving it running behind a hidden bar.
+                        row.progress.classList.remove('indeterminate');
+                        row.bar.style.width = '';
+                    }
+                    row.icon.className = 'material-icons m3uJobIcon m3uStatus' + job.Status;
+                    setText(row.icon, STATUS_ICONS[job.Status] || 'help_outline');
+                    buildActions(row.actions, job);
+                }
+            }
+
+            function renderCounts(jobs) {
+                var container = page.querySelector('#QueueCounts');
+                container.innerHTML = '';
+                var order = ['Downloading', 'Queued', 'Completed', 'Failed', 'Canceled'];
+                var counts = Object.create(null);
+                jobs.forEach(function (job) {
+                    counts[job.Status] = (counts[job.Status] || 0) + 1;
+                });
+                order.forEach(function (status) {
+                    if (!counts[status]) {
+                        return;
+                    }
+                    var chip = document.createElement('span');
+                    chip.className = 'm3uChip m3uStatus' + status;
+                    var dot = document.createElement('span');
+                    dot.className = 'm3uDot';
+                    chip.appendChild(dot);
+                    var label = document.createElement('span');
+                    label.textContent = counts[status] + ' ' + status.toLowerCase();
+                    chip.appendChild(label);
+                    container.appendChild(chip);
+                });
+            }
+
+            function setButtonLabel(button, text) {
+                var span = button.querySelector('span');
+                setText(span || button, text);
+            }
+
+            function renderQueue(jobs) {
+                var list = page.querySelector('#QueueList');
+                if (!list) {
+                    return;
+                }
+
+                renderCounts(jobs);
+
+                var failedCount = jobs.filter(isRetryable).length;
+                var finishedCount = jobs.filter(isFinished).length;
+
+                var retryAll = page.querySelector('#RetryFailedButton');
+                retryAll.disabled = failedCount === 0;
+                setButtonLabel(retryAll, failedCount
+                    ? 'Retry all failed (' + failedCount + ')'
+                    : 'Retry all failed');
+
+                var clearFinished = page.querySelector('#ClearFinishedButton');
+                clearFinished.disabled = finishedCount === 0;
+                setButtonLabel(clearFinished, finishedCount
+                    ? 'Clear finished (' + finishedCount + ')'
+                    : 'Clear finished');
+
+                var visible = jobs.filter(matchesFilter).sort(byRunOrder);
+
+                page.querySelector('#QueueEmpty').style.display = jobs.length ? 'none' : '';
+                page.querySelector('#QueueFiltered').style.display =
+                    jobs.length && !visible.length ? '' : 'none';
+                list.style.display = visible.length ? '' : 'none';
+
+                var seen = Object.create(null);
+                visible.forEach(function (job, index) {
+                    seen[job.Id] = true;
+                    var row = rows[job.Id];
+                    if (!row) {
+                        row = createRow();
+                        rows[job.Id] = row;
+                    }
+                    updateRow(row, job);
+                    if (list.children[index] !== row.el) {
+                        list.insertBefore(row.el, list.children[index] || null);
+                    }
+                });
+
+                // Rows hidden by the filter are dropped from the cache along with removed jobs;
+                // they are rebuilt from the next poll if the filter changes back.
+                Object.keys(rows).forEach(function (id) {
+                    if (!seen[id]) {
+                        rows[id].el.remove();
+                        delete rows[id];
+                    }
+                });
+
+                return jobs;
+            }
+
+            function refreshQueue() {
+                return ApiClient.ajax({ type: 'GET', url: apiUrl('/Jobs'), dataType: 'json' })
+                    .then(renderQueue, function () {
+                        // A single failed poll is usually the server restarting; the next tick
+                        // recovers. Deliberately quiet rather than throwing dialogs at the user.
+                        return null;
+                    });
+            }
+
+            function scheduleNext(delay) {
+                stopPolling();
+                pollTimer = setTimeout(tick, delay);
+            }
+
+            function tick() {
+                // Jellyfin's view lifecycle events are not reliable for an embedded plugin page
+                // -- depending on 'viewhide' to stop the timer previously left polling dead
+                // instead, freezing the queue. Keying off the element's presence in the document
+                // is lifecycle-independent: it cannot leak, and it cannot stop early.
+                if (!document.body.contains(page)) {
+                    stopPolling();
+                    return;
+                }
+
+                // Nothing on this page changes while it is hidden, and an idle queue does not need
+                // a request every two seconds either.
+                if (document.hidden) {
+                    scheduleNext(IDLE_POLL_MS);
+                    return;
+                }
+
+                refreshQueue().then(function (jobs) {
+                    var busy = !jobs || jobs.some(isActive);
+                    scheduleNext(busy ? FAST_POLL_MS : IDLE_POLL_MS);
+                });
+            }
+
+            function startPolling() {
+                scheduleNext(FAST_POLL_MS);
+            }
+
+            function stopPolling() {
+                if (pollTimer) {
+                    clearTimeout(pollTimer);
+                    pollTimer = null;
+                }
+            }
+
+            // Any user action can change the queue immediately, so pull the next poll forward
+            // rather than waiting out a ten-second idle interval.
+            function refreshNow() {
+                stopPolling();
+                return refreshQueue().then(function () {
+                    scheduleNext(FAST_POLL_MS);
+                });
+            }
+
+            document.addEventListener('visibilitychange', function () {
+                if (!document.body.contains(page)) {
+                    return;
+                }
+                if (!document.hidden) {
+                    refreshNow();
+                }
+            });
+
+            function renderRejections(rejected) {
+                var container = page.querySelector('#RejectedLines');
+                if (!rejected || !rejected.length) {
+                    container.style.display = 'none';
+                    container.textContent = '';
+                    return;
+                }
+
+                container.textContent = '';
+                container.style.display = 'block';
+
+                var header = document.createElement('div');
+                header.className = 'm3uCardHeader';
+                var icon = document.createElement('span');
+                icon.className = 'material-icons';
+                icon.setAttribute('aria-hidden', 'true');
+                icon.textContent = 'report_problem';
+                header.appendChild(icon);
+                var title = document.createElement('h3');
+                title.textContent = rejected.length === 1
+                    ? '1 line skipped'
+                    : rejected.length + ' lines skipped';
+                header.appendChild(title);
+                var dismiss = document.createElement('button');
+                dismiss.setAttribute('is', 'paper-icon-button-light');
+                dismiss.setAttribute('type', 'button');
+                dismiss.setAttribute('title', 'Dismiss');
+                dismiss.setAttribute('aria-label', 'Dismiss');
+                dismiss.innerHTML = '<span class="material-icons" aria-hidden="true">close</span>';
+                dismiss.addEventListener('click', function () {
+                    container.style.display = 'none';
+                    container.textContent = '';
+                });
+                header.appendChild(dismiss);
+                container.appendChild(header);
+
+                var ul = document.createElement('ul');
+                rejected.forEach(function (r) {
+                    var li = document.createElement('li');
+                    li.appendChild(document.createTextNode('Line ' + r.LineNumber + ': ' + r.Error + ' \u2014 '));
+                    var code = document.createElement('code');
+                    code.textContent = r.Text;
+                    li.appendChild(code);
+                    ul.appendChild(li);
+                });
+                container.appendChild(ul);
+            }
+
+            function renderPausedState() {
+                var paused = !!settings.QueuePaused;
+                page.querySelector('#PausedBanner').style.display = paused ? 'flex' : 'none';
+                setButtonLabel(page.querySelector('#PauseQueueButton'), paused ? 'Resume queue' : 'Pause queue');
+            }
+
+            function togglePause() {
+                var button = page.querySelector('#PauseQueueButton');
+                button.disabled = true;
+
+                // Re-read before writing: this page also edits the same configuration on its
+                // Settings tab, and posting a stale copy would undo whatever was saved there.
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    config.QueuePaused = !config.QueuePaused;
+                    return ApiClient.updatePluginConfiguration(pluginId, config).then(function () {
+                        settings = config;
+                        renderPausedState();
+                        toast(config.QueuePaused ? 'Queue paused.' : 'Queue resumed.');
+                    });
+                }).then(function () {
+                    button.disabled = false;
+                    refreshNow();
+                }, function () {
+                    button.disabled = false;
+                    toast('Could not change the queue state.');
+                });
+            }
+
+            function updateOutputDirWarning(outputDirectory) {
+                page.querySelector('#NoOutputDirBanner').style.display =
+                    outputDirectory && outputDirectory.trim() ? 'none' : 'flex';
+            }
+
+            function loadConfiguration() {
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    settings = config;
+                    page.querySelector('#OutputDirectory').value = config.OutputDirectory || '';
+                    page.querySelector('#MaxConcurrentDownloads').value = config.MaxConcurrentDownloads || 1;
+                    page.querySelector('#MaxDurationMinutes').value = config.MaxDurationMinutes || 0;
+                    page.querySelector('#HistoryRetentionDays').value = config.HistoryRetentionDays || 0;
+                    page.querySelector('#MaxRetries').value = config.MaxRetries;
+                    page.querySelector('#RetryDelaySeconds').value = config.RetryDelaySeconds;
+                    page.querySelector('#StallTimeoutMinutes').value = config.StallTimeoutMinutes || 0;
+                    page.querySelector('#UserAgent').value = config.UserAgent || '';
+                    page.querySelector('#Referer').value = config.Referer || '';
+                    page.querySelector('#ExtraInputArgs').value = config.ExtraInputArgs || '';
+                    page.querySelector('#ExtraFfmpegArgs').value = config.ExtraFfmpegArgs || '';
+                    page.querySelector('#ReuseHttpConnections').checked = !!config.ReuseHttpConnections;
+                    page.querySelector('#ScanLibraryAfterDownload').checked = !!config.ScanLibraryAfterDownload;
+                    page.querySelector('#LimitLengthOnAllDownloads').checked = !!config.LimitLengthOnAllDownloads;
+                    updateOutputDirWarning(config.OutputDirectory);
+                    renderPausedState();
+                });
+            }
+
+            function saveConfiguration() {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    config.OutputDirectory = page.querySelector('#OutputDirectory').value.trim();
+                    config.MaxConcurrentDownloads =
+                        Math.min(8, Math.max(1, parseInt(page.querySelector('#MaxConcurrentDownloads').value, 10) || 1));
+                    config.MaxDurationMinutes =
+                        Math.max(0, parseInt(page.querySelector('#MaxDurationMinutes').value, 10) || 0);
+                    config.HistoryRetentionDays =
+                        Math.max(0, parseInt(page.querySelector('#HistoryRetentionDays').value, 10) || 0);
+                    config.MaxRetries = parseInt(page.querySelector('#MaxRetries').value, 10) || 0;
+                    config.RetryDelaySeconds = parseInt(page.querySelector('#RetryDelaySeconds').value, 10) || 0;
+                    config.StallTimeoutMinutes =
+                        Math.max(0, parseInt(page.querySelector('#StallTimeoutMinutes').value, 10) || 0);
+                    config.UserAgent = page.querySelector('#UserAgent').value.trim();
+                    config.Referer = page.querySelector('#Referer').value.trim();
+                    config.ExtraInputArgs = page.querySelector('#ExtraInputArgs').value.trim();
+                    config.ExtraFfmpegArgs = page.querySelector('#ExtraFfmpegArgs').value.trim();
+                    config.ReuseHttpConnections = page.querySelector('#ReuseHttpConnections').checked;
+                    config.ScanLibraryAfterDownload = page.querySelector('#ScanLibraryAfterDownload').checked;
+                    config.LimitLengthOnAllDownloads = page.querySelector('#LimitLengthOnAllDownloads').checked;
+
+                    ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
+                        settings = config;
+                        updateOutputDirWarning(config.OutputDirectory);
+                        renderPausedState();
+                        Dashboard.processPluginConfigurationUpdateResult(result);
+                    });
+                });
+            }
+
+            function addJobs() {
+                var textarea = page.querySelector('#BulkInput');
+                if (!textarea.value.trim()) {
+                    return;
+                }
+                var folder = page.querySelector('#DestinationFolder').value.trim();
+                writeStored(FOLDER_KEY, folder);
+
+                Dashboard.showLoadingMsg();
+                ApiClient.ajax({
+                    type: 'POST',
+                    url: apiUrl('/Jobs'),
+                    data: JSON.stringify({ Text: textarea.value, Folder: folder }),
+                    contentType: 'application/json',
+                    dataType: 'json'
+                }).then(function (result) {
+                    Dashboard.hideLoadingMsg();
+                    var added = (result.Added || []).length;
+                    if (!result.Rejected || !result.Rejected.length) {
+                        textarea.value = '';
+                        syncAddButton();
+                    }
+                    renderRejections(result.Rejected);
+                    if (added) {
+                        toast(added === 1 ? 'Queued 1 download.' : 'Queued ' + added + ' downloads.');
+                    }
+                    refreshNow();
+                }, function () {
+                    Dashboard.hideLoadingMsg();
+                    Dashboard.alert('Could not add the downloads to the queue.');
+                });
+            }
+
+            function retryJob(id) {
+                return ApiClient.ajax({ type: 'POST', url: apiUrl('/Jobs/' + id + '/Retry') });
+            }
+
+            function moveJobToTop(id) {
+                return ApiClient.ajax({ type: 'POST', url: apiUrl('/Jobs/' + id + '/MoveToTop') });
+            }
+
+            function moveJobToBottom(id) {
+                return ApiClient.ajax({ type: 'POST', url: apiUrl('/Jobs/' + id + '/MoveToBottom') });
+            }
+
+            function deleteJob(id) {
+                return ApiClient.ajax({ type: 'DELETE', url: apiUrl('/Jobs/' + id) });
+            }
+
+            function syncAddButton() {
+                page.querySelector('#AddJobsButton').disabled =
+                    !page.querySelector('#BulkInput').value.trim();
+            }
+
+            function selectTab(name) {
+                page.querySelectorAll('.m3uTabs a').forEach(function (link) {
+                    link.classList.toggle('ui-btn-active', link.getAttribute('data-tab') === name);
+                });
+                page.querySelectorAll('.m3uTabContent').forEach(function (content) {
+                    content.style.display =
+                        content.getAttribute('data-tab-content') === name ? '' : 'none';
+                });
+                writeStored(TAB_KEY, name);
+            }
+
+            page.querySelector('.m3uTabs').addEventListener('click', function (e) {
+                var link = e.target.closest('a[data-tab]');
+                if (!link) {
+                    return;
+                }
+                e.preventDefault();
+                selectTab(link.getAttribute('data-tab'));
+            });
+
+            page.querySelector('#GoToSettingsButton').addEventListener('click', function () {
+                selectTab('settings');
+                page.querySelector('#OutputDirectory').focus();
+            });
+
+            page.querySelector('#QueueList').addEventListener('click', function (e) {
+                var copyPath = e.target.closest('.btnCopyPath');
+                if (copyPath) {
+                    var pathRow = rows[copyPath.getAttribute('data-id')];
+                    var outputPath = pathRow ? pathRow.path.textContent : null;
+                    if (outputPath) {
+                        copyText(outputPath).then(function () {
+                            toast('Output path copied.');
+                        }, function () {
+                            toast('Could not copy the path.');
+                        });
+                    }
+                    return;
+                }
+
+                var copy = e.target.closest('.btnCopyUrl');
+                if (copy) {
+                    var row = rows[copy.getAttribute('data-id')];
+                    var url = row ? row.title.getAttribute('title') : null;
+                    if (url) {
+                        copyText(url).then(function () {
+                            toast('Source URL copied.');
+                        }, function () {
+                            toast('Could not copy the URL.');
+                        });
+                    }
+                    return;
+                }
+
+                var cancel = e.target.closest('.btnCancel');
+                if (cancel) {
+                    confirmAction('Stop this download? The partial file is discarded.', 'Cancel download')
+                        .then(function (ok) {
+                            if (ok) {
+                                deleteJob(cancel.getAttribute('data-id')).then(refreshNow, refreshNow);
+                            }
+                        });
+                    return;
+                }
+
+                var remove = e.target.closest('.btnRemove');
+                if (remove) {
+                    confirmAction('Remove this entry from the queue? The downloaded file is not deleted.', 'Remove')
+                        .then(function (ok) {
+                            if (ok) {
+                                deleteJob(remove.getAttribute('data-id')).then(refreshNow, refreshNow);
+                            }
+                        });
+                    return;
+                }
+
+                var moveTop = e.target.closest('.btnMoveTop');
+                if (moveTop) {
+                    moveJobToTop(moveTop.getAttribute('data-id')).then(refreshNow, refreshNow);
+                    return;
+                }
+
+                var moveBottom = e.target.closest('.btnMoveBottom');
+                if (moveBottom) {
+                    moveJobToBottom(moveBottom.getAttribute('data-id')).then(refreshNow, refreshNow);
+                    return;
+                }
+
+                var retry = e.target.closest('.btnRetry');
+                if (retry) {
+                    retryJob(retry.getAttribute('data-id')).then(refreshNow, refreshNow);
+                }
+            });
+
+            page.querySelector('#QueueFilter').addEventListener('change', function (e) {
+                filter = e.target.value;
+                writeStored(FILTER_KEY, filter);
+                refreshNow();
+            });
+
+            page.querySelector('#RetryFailedButton').addEventListener('click', function () {
+                // Re-read the queue rather than trusting the ids cached at the last render: a job
+                // can fail in the gap between polls, and acting on the stale snapshot would
+                // silently skip it.
+                ApiClient.ajax({ type: 'GET', url: apiUrl('/Jobs'), dataType: 'json' })
+                    .then(function (jobs) {
+                        var ids = jobs.filter(isRetryable).map(function (j) { return j.Id; });
+                        return Promise.all(ids.map(retryJob));
+                    })
+                    .then(refreshNow, refreshNow);
+            });
+
+            page.querySelector('#PauseQueueButton').addEventListener('click', togglePause);
+
+            page.querySelector('#ClearFinishedButton').addEventListener('click', function () {
+                ApiClient.ajax({ type: 'POST', url: apiUrl('/Jobs/Clear'), dataType: 'json' })
+                    .then(refreshNow, refreshNow);
+            });
+
+            page.querySelector('#M3u8DownloaderConfigForm').addEventListener('submit', function (e) {
+                e.preventDefault();
+                saveConfiguration();
+                return false;
+            });
+
+            page.querySelector('#BulkInput').addEventListener('input', syncAddButton);
+            page.querySelector('#AddJobsButton').addEventListener('click', addJobs);
+
+            function initialize() {
+                // Adding a season's worth of episodes means the same folder over and over, so it
+                // is remembered rather than retyped.
+                page.querySelector('#DestinationFolder').value = readStored(FOLDER_KEY, '');
+                filter = readStored(FILTER_KEY, 'all');
+                page.querySelector('#QueueFilter').value = filter;
+                selectTab(readStored(TAB_KEY, 'downloads'));
+                syncAddButton();
+                loadConfiguration();
+                refreshNow();
+            }
+
+            page.addEventListener('pageshow', initialize);
+
+            // The script runs when Jellyfin injects the page, which may be before or after it
+            // dispatches 'pageshow'. Starting here as well makes the page work either way.
+            initialize();
+        })();
+    </script>
+</div>
+</body>
+</html>

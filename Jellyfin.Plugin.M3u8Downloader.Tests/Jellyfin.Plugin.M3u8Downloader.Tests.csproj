@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Jellyfin.Plugin.M3u8Downloader.Tests</RootNamespace>
+
+    <!--
+      Held to the same bar as the code under test, minus the rules that only make sense for shipped
+      library code:
+
+        SA1600/SA1601/CS1591/SA0001  would demand XML docs on every test method.
+        CA1707                       forbids the underscores the whole
+                                     Method_Scenario_Outcome naming convention depends on.
+        CA2007/CA2016/CA1849         async hygiene for a library that may run under a synchronization
+                                     context. A test host has none, and ConfigureAwait(false) on
+                                     every await would bury what each test is actually asserting.
+        CA1861                       expected-value arrays in assertions. Hoisting each one to a
+                                     static field to save an allocation would make the assertion
+                                     harder to read for no benefit a test run can measure.
+    -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisMode>AllEnabledByDefault</AnalysisMode>
+    <CodeAnalysisRuleSet>../jellyfin.ruleset</CodeAnalysisRuleSet>
+    <NoWarn>$(NoWarn);SA0001;SA1600;SA1601;CS1591;CA1707;CA2007;CA2016;CA1849;CA1861</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="StyleCop.Analyzers" Version="1.2.0-beta.556" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Jellyfin.Plugin.M3u8Downloader/Jellyfin.Plugin.M3u8Downloader.csproj" />
+  </ItemGroup>
+
+  <!--
+    The plugin project excludes the Jellyfin runtime assemblies because the server supplies them.
+    The test host has no server, so reference them here without ExcludeAssets to get them copied
+    into the test output; otherwise anything touching BasePluginConfiguration fails to load.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Jellyfin.Controller" Version="10.11.11" />
+    <PackageReference Include="Jellyfin.Model" Version="10.11.11" />
+  </ItemGroup>
+
+</Project>

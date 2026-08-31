@@ -1,0 +1,10 @@
+bin/
+obj/
+*.user
+.vs/
+.idea/
+artifacts/
+dist/
+CHANGELOG_FRAGMENT.md
+RELEASE_NOTES.md
+.DS_Store

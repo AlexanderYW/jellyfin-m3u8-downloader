@@ -1,0 +1,155 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump: auto derives it from the Conventional Commits since the last tag'
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  PLUGIN_NAME: Jellyfin.Plugin.M3u8Downloader
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history and tags: the next version is derived from the commits since the last tag.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - run: pip install pyyaml
+
+      - name: Work out the next version
+        id: next
+        run: |
+          python .github/scripts/next_version.py \
+            --force-bump "${{ github.event.inputs.bump || 'auto' }}" \
+            --changelog-file CHANGELOG_FRAGMENT.md \
+            --repo-url "${{ github.server_url }}/${{ github.repository }}"
+
+      - name: Nothing to release
+        if: steps.next.outputs.release != 'true'
+        run: echo "::notice::${{ steps.next.outputs.reason }}"
+
+      - name: Set up .NET
+        if: steps.next.outputs.release == 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Stamp version into the build
+        if: steps.next.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          v="${{ steps.next.outputs.version4 }}"
+          sed -i -E "s|<AssemblyVersion>[^<]*</AssemblyVersion>|<AssemblyVersion>$v</AssemblyVersion>|" "$PLUGIN_NAME/$PLUGIN_NAME.csproj"
+          sed -i -E "s|<FileVersion>[^<]*</FileVersion>|<FileVersion>$v</FileVersion>|" "$PLUGIN_NAME/$PLUGIN_NAME.csproj"
+          sed -i -E "s|^version: .*|version: \"$v\"|" build.yaml
+
+      - name: Build and test
+        if: steps.next.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          dotnet restore "$PLUGIN_NAME.sln"
+          dotnet build "$PLUGIN_NAME.sln" --configuration Release --no-restore
+          dotnet test "$PLUGIN_NAME.sln" --configuration Release --no-build --verbosity normal
+
+      - name: Package
+        id: package
+        if: steps.next.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          v="${{ steps.next.outputs.version4 }}"
+          tag="${{ steps.next.outputs.tag }}"
+          zip_name="${PLUGIN_NAME}_${v}.zip"
+          mkdir -p dist/package
+          cp "$PLUGIN_NAME/bin/Release/net9.0/$PLUGIN_NAME.dll" dist/package/
+          # Jellyfin unpacks the zip straight into the plugin directory, so no top-level folder.
+          (cd dist/package && zip -r "../$zip_name" .)
+          checksum="$(md5sum "dist/$zip_name" | cut -d' ' -f1)"
+          echo "$checksum  $zip_name" > "dist/$zip_name.md5"
+          echo "zip_name=$zip_name" >> "$GITHUB_OUTPUT"
+          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
+          echo "source_url=${{ github.server_url }}/${{ github.repository }}/releases/download/$tag/$zip_name" >> "$GITHUB_OUTPUT"
+
+      - name: Tag the release
+        if: steps.next.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.next.outputs.tag }}" -m "${{ steps.next.outputs.tag }}"
+          git push origin "${{ steps.next.outputs.tag }}"
+
+      - name: Assemble the release notes
+        if: steps.next.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          {
+            cat CHANGELOG_FRAGMENT.md
+            echo
+            echo "**MD5:** \`${{ steps.package.outputs.checksum }}\`"
+            echo
+            echo "Install by adding this plugin repository to Jellyfin (Dashboard → Plugins → Repositories):"
+            echo "\`${{ github.server_url }}/${{ github.repository }}/raw/${{ github.event.repository.default_branch }}/manifest.json\`"
+          } > RELEASE_NOTES.md
+
+      - name: Publish GitHub release
+        if: steps.next.outputs.release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.next.outputs.tag }}
+          name: ${{ steps.next.outputs.tag }}
+          body_path: RELEASE_NOTES.md
+          files: |
+            dist/${{ steps.package.outputs.zip_name }}
+            dist/${{ steps.package.outputs.zip_name }}.md5
+          fail_on_unmatched_files: true
+
+      # The manifest lives on the default branch — that is the URL servers poll — so it is
+      # updated in a clean checkout of that branch rather than in the built tree.
+      - name: Check out the default branch
+        if: steps.next.outputs.release == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: manifest-branch
+
+      - name: Publish the version to manifest.json
+        if: steps.next.outputs.release == 'true'
+        working-directory: manifest-branch
+        run: |
+          set -euo pipefail
+          python .github/scripts/update_manifest.py \
+            --version "${{ steps.next.outputs.version4 }}" \
+            --checksum "${{ steps.package.outputs.checksum }}" \
+            --source-url "${{ steps.package.outputs.source_url }}" \
+            --changelog-file "$GITHUB_WORKSPACE/CHANGELOG_FRAGMENT.md" \
+            --repo-url "${{ github.server_url }}/${{ github.repository }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- manifest.json; then
+            echo "manifest.json unchanged"
+            exit 0
+          fi
+          git add manifest.json
+          # [skip ci] is belt and braces: pushes made with GITHUB_TOKEN do not retrigger workflows.
+          git commit -m "chore(release): publish ${{ steps.next.outputs.version4 }} to the plugin manifest [skip ci]"
+          git push origin HEAD:"${{ github.event.repository.default_branch }}"
