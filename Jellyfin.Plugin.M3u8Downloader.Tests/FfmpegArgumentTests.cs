@@ -386,6 +386,52 @@ public class FfmpegArgumentTests
         Assert.Equal("2.5", args[args.IndexOf("-readrate") + 1]);
     }
 
+    // ---------------------------------------------------------------- request headers
+
+    [Fact]
+    public void BuildDownloadArguments_StripsNewlinesFromTheReferer()
+    {
+        // The -headers value is a CRLF-separated block, so a break inside one entry does not stay
+        // inside it. A Referer pasted from a browser's network panel routinely carries one.
+        var config = new PluginConfiguration { Referer = "https://example.com/watch\r\n" };
+
+        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config).ToList();
+
+        Assert.Equal("Referer: https://example.com/watch\r\n", args[args.IndexOf("-headers") + 1]);
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_RefererCannotSmuggleAFurtherHeader()
+    {
+        var config = new PluginConfiguration { Referer = "https://example.com\r\nX-Injected: 1" };
+
+        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config).ToList();
+
+        var value = args[args.IndexOf("-headers") + 1];
+        Assert.Equal("Referer: https://example.comX-Injected: 1\r\n", value);
+        Assert.Single(args, a => a == "-headers");
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_StripsNewlinesFromTheUserAgent()
+    {
+        var config = new PluginConfiguration { UserAgent = "Mozilla/5.0\n" };
+
+        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config).ToList();
+
+        Assert.Equal("Mozilla/5.0", args[args.IndexOf("-user_agent") + 1]);
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_ARefererOfOnlyWhitespaceIsNotSent()
+    {
+        var config = new PluginConfiguration { Referer = "\r\n  " };
+
+        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config).ToList();
+
+        Assert.DoesNotContain("-headers", args);
+    }
+
     // ---------------------------------------------------------------- rate-limit detection
 
     [Theory]

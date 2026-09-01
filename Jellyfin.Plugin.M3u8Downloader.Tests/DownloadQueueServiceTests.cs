@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using Jellyfin.Plugin.M3u8Downloader.Model;
 using Jellyfin.Plugin.M3u8Downloader.Services;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -688,5 +689,17 @@ public sealed class DownloadQueueServiceTests : IDisposable
         using var queue = NewQueue();
 
         Assert.Empty(queue.GetAll());
+    }
+
+    [Fact]
+    public async Task WaitForWorkAsync_AfterDispose_ReturnsRatherThanThrowing()
+    {
+        // Dispose can run while the worker is parked on the signal. Letting the resulting
+        // ObjectDisposedException escape means the worker's catch-all reports every clean shutdown
+        // as "the worker stopped unexpectedly".
+        var queue = NewQueue();
+        queue.Dispose();
+
+        await queue.WaitForWorkAsync(TimeSpan.FromMilliseconds(50), CancellationToken.None);
     }
 }

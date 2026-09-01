@@ -1162,18 +1162,36 @@ public sealed partial class FfmpegDownloader : IFfmpegDownloader
     /// <param name="config">Current plugin settings.</param>
     private static void AppendRequestHeaders(List<string> args, PluginConfiguration config)
     {
-        if (!string.IsNullOrWhiteSpace(config.UserAgent))
+        var userAgent = StripNewlines(config.UserAgent);
+        if (!string.IsNullOrWhiteSpace(userAgent))
         {
             args.Add("-user_agent");
-            args.Add(config.UserAgent);
+            args.Add(userAgent);
         }
 
-        if (!string.IsNullOrWhiteSpace(config.Referer))
+        var referer = StripNewlines(config.Referer);
+        if (!string.IsNullOrWhiteSpace(referer))
         {
             args.Add("-headers");
-            args.Add("Referer: " + config.Referer + "\r\n");
+            args.Add("Referer: " + referer + "\r\n");
         }
     }
+
+    /// <summary>
+    /// Removes line breaks from a value destined for an HTTP request header.
+    /// </summary>
+    /// <param name="value">The configured header value.</param>
+    /// <returns>The value with any CR or LF removed, and surrounding whitespace trimmed.</returns>
+    /// <remarks>
+    /// The -headers value is a header block whose entries are separated by CRLF, so a break inside
+    /// one entry does not stay inside it. A Referer copied out of a browser's network panel
+    /// routinely carries a trailing newline, which is enough to produce a malformed block; a value
+    /// containing an embedded one would append whatever followed it as a further header.
+    /// </remarks>
+    private static string StripNewlines(string? value) =>
+        value is null ? string.Empty : value.Replace("\r", string.Empty, StringComparison.Ordinal)
+            .Replace("\n", string.Empty, StringComparison.Ordinal)
+            .Trim();
 
     /// <summary>
     /// Points a child process at the configured proxy, reporting a value that cannot be used.

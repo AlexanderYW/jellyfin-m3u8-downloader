@@ -619,6 +619,12 @@ public sealed class DownloadQueueService : IDownloadQueueService, IDisposable
         {
             // Shutdown; the worker loop checks the token itself.
         }
+        catch (ObjectDisposedException)
+        {
+            // Dispose ran while the worker was parked here. Also shutdown, and also the worker's
+            // own token to observe -- but letting this escape means every clean stop is reported
+            // as "the worker stopped unexpectedly" by the loop's catch-all.
+        }
     }
 
     /// <inheritdoc />
