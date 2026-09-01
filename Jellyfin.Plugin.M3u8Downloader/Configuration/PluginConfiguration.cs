@@ -27,6 +27,54 @@ public class PluginConfiguration : BasePluginConfiguration
     public int MaxConcurrentDownloads { get; set; } = 1;
 
     /// <summary>
+    /// Gets or sets how many downloads may run against a single hostname at the same time.
+    /// </summary>
+    /// <remarks>
+    /// Defaults to 1, and is applied on top of <see cref="MaxConcurrentDownloads"/> rather than
+    /// instead of it: eight concurrent downloads spread across eight different sites is ordinary
+    /// use, while eight aimed at one site is what gets a server's IP blocked. With this at 1, the
+    /// queue simply skips past a job whose host is already busy and claims the next one that is
+    /// free, so raising the global limit stays useful without concentrating the load.
+    /// </remarks>
+    public int MaxConcurrentPerHost { get; set; } = 1;
+
+    /// <summary>
+    /// Gets or sets how long to wait before starting another download from the same host.
+    /// </summary>
+    /// <remarks>
+    /// A short gap so a queue of episodes from one site does not arrive as one unbroken stream of
+    /// requests. Jobs on other hosts are unaffected and start immediately.
+    /// </remarks>
+    public int DelayBetweenDownloadsSeconds { get; set; } = 5;
+
+    /// <summary>
+    /// Gets or sets how long every job on a host is held back after that host rate-limits us.
+    /// </summary>
+    /// <remarks>
+    /// The ordinary retry delay is the wrong tool for a <c>429</c> or <c>403</c>. A remux has no
+    /// resume point, so a retry re-requests the whole stream from the first segment -- while the
+    /// host is still refusing us, which is how a soft throttle becomes a lasting block. The pause
+    /// covers the host rather than the single job, because it is the host that is refusing us.
+    /// </remarks>
+    public int RateLimitBackoffMinutes { get; set; } = 30;
+
+    /// <summary>
+    /// Gets or sets a cap on download speed as a multiple of realtime playback. Zero is uncapped.
+    /// </summary>
+    /// <remarks>
+    /// Passed as ffmpeg's <c>-readrate</c>. Uncapped, ffmpeg fetches segments as fast as the
+    /// connection allows: a two-hour stream lands in a couple of minutes as one dense burst of
+    /// several hundred requests, which is the traffic shape rate limiters exist to catch. At the
+    /// default of 10 the same stream takes about twelve minutes as a steady trickle. Lower it to
+    /// 2 or 3 for a host that has already blocked you.
+    ///
+    /// Requires ffmpeg 5.1 or newer, which every Jellyfin 10.9+ bundle satisfies. A server pointed
+    /// at an older ffmpeg will see downloads fail with <c>Option not found</c>; set this to 0
+    /// there.
+    /// </remarks>
+    public double MaxSpeedMultiplier { get; set; } = 10;
+
+    /// <summary>
     /// Gets or sets a cap on how long any single download may record, in minutes. Zero is no cap.
     /// </summary>
     /// <remarks>
@@ -104,17 +152,75 @@ public class PluginConfiguration : BasePluginConfiguration
     public string Referer { get; set; } = string.Empty;
 
     /// <summary>
+    /// Gets or sets the HTTP proxy used for downloads, as <c>http://host:port</c>. Empty uses no
+    /// proxy.
+    /// </summary>
+    /// <remarks>
+    /// Applied to the ffmpeg and ffprobe child processes this plugin starts, and to nothing else --
+    /// the rest of the server keeps talking to the network directly.
+    ///
+    /// It is passed as the <c>http_proxy</c> environment variable rather than ffmpeg's
+    /// <c>-http_proxy</c> option on purpose. The option is an input option that does not reach the
+    /// nested HTTP opens an HLS playlist triggers -- segments, AES key URIs, variant playlists --
+    /// whereas the environment variable applies to every request the process makes.
+    ///
+    /// ffmpeg speaks to HTTP proxies only, so the value must use the <c>http</c> scheme even when
+    /// the stream itself is <c>https</c> (it is tunnelled with <c>CONNECT</c>). SOCKS proxies are
+    /// not supported. Credentials may be embedded as <c>http://user:pass@host:port</c>, in which
+    /// case they are stored in plain text in this plugin's configuration file like every other
+    /// setting here.
+    /// </remarks>
+    public string ProxyUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Gets or sets the comma-separated hosts that bypass <see cref="ProxyUrl"/>. Empty proxies
+    /// everything.
+    /// </summary>
+    /// <remarks>
+    /// Passed through as ffmpeg's <c>no_proxy</c>, for example
+    /// <c>localhost,127.0.0.1,.lan</c>. Ignored when no proxy is configured.
+    /// </remarks>
+    public string ProxyBypassList { get; set; } = string.Empty;
+
+    /// <summary>
     /// Gets or sets a value indicating whether ffmpeg may reuse one HTTP connection across
     /// segments.
     /// </summary>
     /// <remarks>
-    /// Off by default. Many CDNs serve consecutive segments from rotating hostnames, and reusing
-    /// a connection across them produces
-    /// <c>Cannot reuse HTTP connection for different host</c> followed by truncated segments and
-    /// a failed download. Turning it on is slightly faster on CDNs that use a stable hostname.
-    /// Only applies to HLS inputs.
+    /// On by default. Without it every segment costs a fresh TCP and TLS handshake -- roughly 1200
+    /// new connections for a two-hour stream -- and connection rate is one of the first things a
+    /// host's rate limiter counts, so the old default of off was a good way to look like a
+    /// scraper.
+    ///
+    /// Turn it off for a CDN that serves consecutive segments from rotating hostnames: reusing a
+    /// connection across those produces
+    /// <c>Cannot reuse HTTP connection for different host</c> followed by truncated segments and a
+    /// failed download. Only applies to HLS inputs.
+    ///
+    /// Note that flipping this default only affects new installations. An existing install has
+    /// <c>false</c> written into its saved configuration, and nothing can tell that apart from a
+    /// deliberate choice, so it has to be switched on by hand there.
     /// </remarks>
-    public bool ReuseHttpConnections { get; set; }
+    public bool ReuseHttpConnections { get; set; } = true;
+
+    /// <summary>
+    /// Gets or sets a value indicating whether damaged packets are dropped instead of failing the
+    /// download.
+    /// </summary>
+    /// <remarks>
+    /// On by default. Some hosts serve short segments -- ffmpeg reports
+    /// <c>Stream ends prematurely at N, should be M</c> -- and the partial frame at the end of one
+    /// reaches the Matroska muxer as an invalid packet, which aborts the whole download with
+    /// <c>Error parsing ADTS frame header</c> or <c>Error muxing a packet</c>. Retrying does not
+    /// help when the host truncates the same segment every time.
+    ///
+    /// This adds ffmpeg's <c>-fflags +discardcorrupt</c> and <c>-err_detect ignore_err</c>, so the
+    /// damaged packets are discarded and the rest of the stream is written. The cost is a brief
+    /// glitch where each truncated segment ends, in exchange for a file instead of a failure; a
+    /// stream with no damaged packets is unaffected. Turn it off to have such a download fail
+    /// loudly rather than complete with gaps.
+    /// </remarks>
+    public bool TolerateCorruptSegments { get; set; } = true;
 
     /// <summary>
     /// Gets or sets extra ffmpeg arguments placed before <c>-i</c>, as input options.

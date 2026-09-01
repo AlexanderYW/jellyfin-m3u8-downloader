@@ -45,6 +45,15 @@ public sealed class DownloadQueueService : IDownloadQueueService, IDisposable
     /// </remarks>
     private readonly HashSet<Guid> _cancelRequested = new();
 
+    /// <summary>Earliest UTC time a new download may start against each hostname.</summary>
+    /// <remarks>
+    /// Deliberately not persisted: a cooldown is a courtesy towards a host over the next few
+    /// minutes, and a server that has just restarted has not sent it anything anyway. Entries are
+    /// pruned as they expire in <see cref="TryDequeueNext"/>, so this stays bounded by the number
+    /// of hosts currently in play rather than by everything ever downloaded.
+    /// </remarks>
+    private readonly Dictionary<string, DateTime> _hostCooldowns = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Serialises the actual file write, which happens outside <see cref="_lock"/>.</summary>
     private readonly object _writeLock = new();
 
@@ -144,7 +153,7 @@ public sealed class DownloadQueueService : IDownloadQueueService, IDisposable
     }
 
     /// <inheritdoc />
-    public DownloadJob? TryDequeueNext(int maxConcurrent)
+    public DownloadJob? TryDequeueNext(int maxConcurrent, int maxPerHost = 1)
     {
         DownloadJob? next;
         PendingSave pending;
@@ -160,8 +169,25 @@ public sealed class DownloadQueueService : IDownloadQueueService, IDisposable
                 return null;
             }
 
+            // An expired cooldown has no further say, and dropping it here is what keeps the
+            // dictionary bounded without a timer of its own.
+            foreach (var expired in _hostCooldowns.Where(e => e.Value <= now).Select(e => e.Key).ToList())
+            {
+                _hostCooldowns.Remove(expired);
+            }
+
+            // The per-host limit is a filter on candidates rather than an early return, so a busy
+            // or cooling host holds up only its own jobs: the queue walks past them in position
+            // order and claims the next job on a host that is free.
+            var perHostLimit = Math.Max(1, maxPerHost);
+            var running = _jobs
+                .Where(j => j.Status == JobStatus.Downloading)
+                .GroupBy(j => HostOf(j.Url), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+
             next = _jobs
                 .Where(j => j.Status == JobStatus.Queued && (j.NotBeforeUtc is null || j.NotBeforeUtc <= now))
+                .Where(j => IsHostFree(HostOf(j.Url), running, perHostLimit))
                 .OrderBy(j => j.QueuePosition ?? long.MaxValue)
                 .FirstOrDefault();
 
@@ -257,6 +283,60 @@ public sealed class DownloadQueueService : IDownloadQueueService, IDisposable
 
         Flush(pending);
     }
+
+    /// <inheritdoc />
+    public void CoolDownHost(string url, TimeSpan duration)
+    {
+        if (duration <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        var until = DateTime.UtcNow.Add(duration);
+        var host = HostOf(url);
+
+        lock (_lock)
+        {
+            // Extend only. The courtesy gap after a download finishes must never shorten the long
+            // backoff a rate limit just imposed on the same host.
+            if (!_hostCooldowns.TryGetValue(host, out var existing) || until > existing)
+            {
+                _hostCooldowns[host] = until;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Decides whether another download may start against a host right now.
+    /// </summary>
+    /// <param name="host">The hostname, as returned by <see cref="HostOf"/>.</param>
+    /// <param name="running">How many downloads are in flight per host.</param>
+    /// <param name="maxPerHost">The per-host limit, already floored at 1.</param>
+    /// <returns><c>true</c> when the host is neither at its limit nor cooling down.</returns>
+    /// <remarks>Callers must hold <see cref="_lock"/>: it reads <see cref="_hostCooldowns"/>.</remarks>
+    private bool IsHostFree(string host, Dictionary<string, int> running, int maxPerHost)
+    {
+        if (_hostCooldowns.ContainsKey(host))
+        {
+            // Expired entries were already pruned by the caller, so anything still here is live.
+            return false;
+        }
+
+        return !running.TryGetValue(host, out var count) || count < maxPerHost;
+    }
+
+    /// <summary>
+    /// Extracts the hostname a job's URL points at.
+    /// </summary>
+    /// <param name="url">The job URL.</param>
+    /// <returns>The hostname, or the raw string when it will not parse.</returns>
+    /// <remarks>
+    /// Falling back to the whole URL is defensive rather than expected -- the API validates that a
+    /// job URL is http or https before it is ever queued. Treating an unparseable URL as its own
+    /// host keeps it isolated: it can neither join another host's budget nor escape a limit.
+    /// </remarks>
+    private static string HostOf(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host : url;
 
     /// <inheritdoc />
     public bool MarkAttemptFailed(Guid jobId, string error, int maxRetries, TimeSpan retryDelay)

@@ -27,6 +27,8 @@ public class FfmpegArgumentTests
                 "-hide_banner", "-nostdin", "-loglevel", "error", "-progress", "pipe:1",
                 "-reconnect", "1", "-reconnect_streamed", "1",
                 "-reconnect_on_network_error", "1", "-reconnect_delay_max", "30",
+                "-readrate", "10",
+                "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
                 "-i", Url,
                 "-map", "0:v?", "-map", "0:a?", "-map", "0:s?",
                 "-c", "copy",
@@ -46,6 +48,8 @@ public class FfmpegArgumentTests
                 "-hide_banner", "-nostdin", "-loglevel", "error", "-progress", "pipe:1",
                 "-reconnect", "1", "-reconnect_streamed", "1",
                 "-reconnect_on_network_error", "1", "-reconnect_delay_max", "30",
+                "-readrate", "10",
+                "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
                 "-i", Url,
                 "-map", "0:p:4", "-dn",
                 "-c", "copy",
@@ -194,6 +198,30 @@ public class FfmpegArgumentTests
     }
 
     [Fact]
+    public void BuildDownloadArguments_DiscardsCorruptPacketsByDefault()
+    {
+        // A truncated segment leaves a partial frame that the Matroska muxer rejects outright,
+        // killing the download; these two make the demuxer drop it instead.
+        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, new PluginConfiguration()).ToList();
+
+        Assert.Equal("ignore_err", args[args.IndexOf("-err_detect") + 1]);
+        Assert.Equal("+discardcorrupt", args[args.IndexOf("-fflags") + 1]);
+        Assert.True(args.IndexOf("-err_detect") < args.IndexOf("-i"), "-err_detect must be an input option");
+        Assert.True(args.IndexOf("-fflags") < args.IndexOf("-i"), "-fflags must be an input option");
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_KeepsCorruptPacketsWhenToleranceIsOff()
+    {
+        var config = new PluginConfiguration { TolerateCorruptSegments = false };
+
+        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config);
+
+        Assert.DoesNotContain("-err_detect", args);
+        Assert.DoesNotContain("-fflags", args);
+    }
+
+    [Fact]
     public void BuildDownloadArguments_NonHls_OmitsHlsOnlyOptions()
     {
         // ffmpeg fails the input with "Option not found" when these reach a non-HLS demuxer.
@@ -204,24 +232,28 @@ public class FfmpegArgumentTests
     }
 
     [Fact]
-    public void BuildDownloadArguments_Hls_RetriesSegmentsAndDisablesConnectionReuse()
+    public void BuildDownloadArguments_Hls_RetriesSegmentsAndReusesConnectionsByDefault()
     {
+        // Keep-alive is the default because the alternative is a fresh TCP+TLS handshake per
+        // segment -- around 1200 new connections for a two-hour stream, which is precisely what a
+        // host's connection-rate limiter counts.
         var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, new PluginConfiguration(), isHls: true).ToList();
 
         Assert.Equal("5", args[args.IndexOf("-seg_max_retry") + 1]);
-        Assert.Equal("0", args[args.IndexOf("-http_persistent") + 1]);
         Assert.True(args.IndexOf("-seg_max_retry") < args.IndexOf("-i"));
-        Assert.True(args.IndexOf("-http_persistent") < args.IndexOf("-i"));
+        Assert.DoesNotContain("-http_persistent", args);
     }
 
     [Fact]
-    public void BuildDownloadArguments_Hls_KeepsConnectionReuseWhenEnabled()
+    public void BuildDownloadArguments_Hls_DisablesConnectionReuseWhenTurnedOff()
     {
-        var config = new PluginConfiguration { ReuseHttpConnections = true };
+        // The opt-out, for CDNs that rotate the hostname between segments.
+        var config = new PluginConfiguration { ReuseHttpConnections = false };
 
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config, isHls: true);
+        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config, isHls: true).ToList();
 
-        Assert.DoesNotContain("-http_persistent", args);
+        Assert.Equal("0", args[args.IndexOf("-http_persistent") + 1]);
+        Assert.True(args.IndexOf("-http_persistent") < args.IndexOf("-i"));
         Assert.Contains("-seg_max_retry", args);
     }
 
@@ -249,6 +281,190 @@ public class FfmpegArgumentTests
 
         Assert.True(args.IndexOf("-INPUTMARK") < args.IndexOf("-i"));
         Assert.True(args.IndexOf("-OUTPUTMARK") > args.IndexOf("-i"));
+    }
+
+    // ---------------------------------------------------------------- rendition fan-out
+
+    [Fact]
+    public void BuildDownloadArguments_FailedProbeOnHls_MapsNothingSoOnlyOneRenditionIsFetched()
+    {
+        // The whole point of this case. On a master playlist every bitrate rendition is its own
+        // video stream, so "-map 0:v?" selects all of them and the HLS demuxer fetches four to six
+        // variant playlists simultaneously from one host -- which reads as a scraper and gets the
+        // server's IP blocked. Mapping nothing leaves ffmpeg's default selection to take a single
+        // video, and only that variant is ever requested.
+        var args = FfmpegDownloader.BuildDownloadArguments(
+            Url,
+            Output,
+            new PluginConfiguration(),
+            bestProgramId: null,
+            isHls: true,
+            probeSucceeded: false);
+
+        Assert.DoesNotContain("-map", args);
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_SuccessfulProbeWithNoProgram_StillMapsEveryStreamType()
+    {
+        // A probe that succeeded and found fewer than two programs genuinely has no renditions to
+        // fan out across, so the per-type mapping is safe here and keeps every audio track.
+        var args = FfmpegDownloader.BuildDownloadArguments(
+            Url,
+            Output,
+            new PluginConfiguration(),
+            bestProgramId: null,
+            isHls: true,
+            probeSucceeded: true).ToList();
+
+        Assert.Contains("0:v?", args);
+        Assert.Contains("0:a?", args);
+        Assert.Contains("0:s?", args);
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_FailedProbeOnNonHls_StillMapsEveryStreamType()
+    {
+        // A non-HLS input has no renditions, so a failed probe there costs nothing and the extra
+        // audio tracks are worth keeping.
+        var args = FfmpegDownloader.BuildDownloadArguments(
+            Url,
+            Output,
+            new PluginConfiguration(),
+            bestProgramId: null,
+            isHls: false,
+            probeSucceeded: false).ToList();
+
+        Assert.Contains("0:v?", args);
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_KnownProgram_IgnoresTheProbeFlag()
+    {
+        // A program id can only have come from a successful probe, but the program map must win
+        // regardless -- it is strictly better than either fallback.
+        var args = FfmpegDownloader.BuildDownloadArguments(
+            Url,
+            Output,
+            new PluginConfiguration(),
+            bestProgramId: 4,
+            isHls: true,
+            probeSucceeded: false).ToList();
+
+        Assert.Contains("0:p:4", args);
+        Assert.DoesNotContain("0:v?", args);
+    }
+
+    // ---------------------------------------------------------------- speed limit
+
+    [Fact]
+    public void BuildDownloadArguments_PacesTheDownloadByDefault()
+    {
+        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, new PluginConfiguration()).ToList();
+
+        Assert.Equal("10", args[args.IndexOf("-readrate") + 1]);
+        Assert.True(args.IndexOf("-readrate") < args.IndexOf("-i"), "-readrate must be an input option");
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_OmitsTheSpeedLimitWhenZero()
+    {
+        // 0 is the escape hatch for an ffmpeg older than 5.1, which rejects the option outright.
+        var config = new PluginConfiguration { MaxSpeedMultiplier = 0 };
+
+        Assert.DoesNotContain("-readrate", FfmpegDownloader.BuildDownloadArguments(Url, Output, config));
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_FormatsAFractionalSpeedLimitInvariantly()
+    {
+        // A locale that writes "2,5" would have ffmpeg reject the whole input.
+        var config = new PluginConfiguration { MaxSpeedMultiplier = 2.5 };
+
+        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config).ToList();
+
+        Assert.Equal("2.5", args[args.IndexOf("-readrate") + 1]);
+    }
+
+    // ---------------------------------------------------------------- rate-limit detection
+
+    [Theory]
+    [InlineData("[https @ 0x55] HTTP error 429 Too Many Requests")]
+    [InlineData("[https @ 0x55] HTTP error 403 Forbidden")]
+    [InlineData("Server returned 403 Forbidden (access denied)")]
+    [InlineData("Server returned 429 Too Many Requests")]
+    public void IsRateLimited_RecognisesAHostRefusingUs(string line)
+    {
+        Assert.True(FfmpegDownloader.IsRateLimited(new[] { "Opening 'https://example.com/1.ts'", line }));
+    }
+
+    [Theory]
+    [InlineData("Error muxing a packet")]
+    [InlineData("Stream ends prematurely at 12345, should be 23456")]
+    [InlineData("[https @ 0x55] HTTP error 404 Not Found")]
+    [InlineData("Server returned 500 Internal Server Error")]
+    [InlineData("")]
+    public void IsRateLimited_LeavesOrdinaryFailuresToTheNormalRetry(string line)
+    {
+        Assert.False(FfmpegDownloader.IsRateLimited(new[] { line }));
+    }
+
+    [Fact]
+    public void IsRateLimited_EmptyOutput_IsNotARateLimit()
+    {
+        Assert.False(FfmpegDownloader.IsRateLimited(Array.Empty<string>()));
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_CopiesAudioByDefault()
+    {
+        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, new PluginConfiguration());
+
+        Assert.DoesNotContain("-c:a", args);
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_ReencodeAudio_OverridesOnlyTheAudioCodec()
+    {
+        var args = FfmpegDownloader.BuildDownloadArguments(
+            Url, Output, new PluginConfiguration(), reencodeAudio: true).ToList();
+
+        // "-c copy" must stay so video and subtitles are still copied; "-c:a aac" only wins
+        // because it comes after it.
+        Assert.Equal("copy", args[args.IndexOf("-c") + 1]);
+        Assert.Equal("aac", args[args.IndexOf("-c:a") + 1]);
+        Assert.True(args.IndexOf("-c") < args.IndexOf("-c:a"), "-c:a must override -c copy");
+    }
+
+    [Fact]
+    public void IsAudioBitstreamFailure_RecognisesTheMuxDyingInsideTheFilter()
+    {
+        var stderr = new[]
+        {
+            "[https @ 0x55] Stream ends prematurely at 540411, should be 574904",
+            "[aac_adtstoasc @ 0x55] Error parsing ADTS frame header!",
+            "[matroska @ 0x55] Error applying bitstream filters to an output packet for stream #0: Invalid data found when processing input",
+            "[out#0/matroska @ 0x55] Error muxing a packet",
+        };
+
+        Assert.True(FfmpegDownloader.IsAudioBitstreamFailure(stderr));
+    }
+
+    [Theory]
+    [InlineData("[aac_adtstoasc @ 0x55] Error parsing ADTS frame header!")]
+    [InlineData("[matroska @ 0x55] Error applying bitstream filters to an output packet for stream #0")]
+    [InlineData("[out#0/matroska @ 0x55] Error muxing a packet")]
+    [InlineData("Invalid data found when processing input")]
+    public void IsAudioBitstreamFailure_NeedsBothHalvesOfTheSignature(string line)
+    {
+        // Either half alone is too weak to justify spending a second full download on.
+        Assert.False(FfmpegDownloader.IsAudioBitstreamFailure(new[] { line }));
+    }
+
+    [Fact]
+    public void IsAudioBitstreamFailure_EmptyOutput_IsNotABitstreamFailure()
+    {
+        Assert.False(FfmpegDownloader.IsAudioBitstreamFailure(Array.Empty<string>()));
     }
 
     // ---------------------------------------------------------------- probe arguments
@@ -300,6 +516,92 @@ public class FfmpegArgumentTests
         var config = new PluginConfiguration { ExtraInputArgs = "-rw_timeout 5000000" };
 
         Assert.DoesNotContain("-rw_timeout", FfmpegDownloader.BuildProbeArguments(Url, config));
+    }
+
+    // ---------------------------------------------------------------- proxy
+
+    [Fact]
+    public void ApplyProxyEnvironment_SetsEveryProxyVariableSpelling()
+    {
+        var config = new PluginConfiguration { ProxyUrl = "http://10.0.0.5:8080" };
+        var env = new Dictionary<string, string?>(StringComparer.Ordinal);
+
+        var applied = FfmpegDownloader.ApplyProxyEnvironment(env, config);
+
+        Assert.Equal("http://10.0.0.5:8080", applied);
+        Assert.Equal("http://10.0.0.5:8080", env["http_proxy"]);
+        Assert.Equal("http://10.0.0.5:8080", env["https_proxy"]);
+        Assert.Equal("http://10.0.0.5:8080", env["HTTP_PROXY"]);
+        Assert.Equal("http://10.0.0.5:8080", env["HTTPS_PROXY"]);
+
+        // https_proxy still points at an http:// endpoint: ffmpeg reaches the proxy in the clear
+        // and tunnels TLS through it with CONNECT.
+        Assert.DoesNotContain("no_proxy", env.Keys);
+    }
+
+    [Fact]
+    public void ApplyProxyEnvironment_LeavesTheEnvironmentAloneWhenNoProxyIsConfigured()
+    {
+        var env = new Dictionary<string, string?>(StringComparer.Ordinal);
+
+        Assert.Null(FfmpegDownloader.ApplyProxyEnvironment(env, new PluginConfiguration()));
+        Assert.Empty(env);
+    }
+
+    [Theory]
+    [InlineData("socks5://10.0.0.5:1080")]
+    [InlineData("https://10.0.0.5:8080")]
+    [InlineData("10.0.0.5:8080")]
+    [InlineData("not a url")]
+    public void ApplyProxyEnvironment_RejectsAnythingFfmpegCannotUse(string proxy)
+    {
+        // Applying one of these would leave the download silently unproxied, which is the one
+        // outcome a proxy user must not get by accident.
+        var config = new PluginConfiguration { ProxyUrl = proxy };
+        var env = new Dictionary<string, string?>(StringComparer.Ordinal);
+
+        Assert.Null(FfmpegDownloader.ApplyProxyEnvironment(env, config));
+        Assert.Empty(env);
+    }
+
+    [Fact]
+    public void ApplyProxyEnvironment_SetsTheBypassListWhenGiven()
+    {
+        var config = new PluginConfiguration
+        {
+            ProxyUrl = "http://10.0.0.5:8080",
+            ProxyBypassList = "localhost,127.0.0.1,.lan",
+        };
+        var env = new Dictionary<string, string?>(StringComparer.Ordinal);
+
+        FfmpegDownloader.ApplyProxyEnvironment(env, config);
+
+        Assert.Equal("localhost,127.0.0.1,.lan", env["no_proxy"]);
+        Assert.Equal("localhost,127.0.0.1,.lan", env["NO_PROXY"]);
+    }
+
+    [Fact]
+    public void ApplyProxyEnvironment_IgnoresTheBypassListWithoutAProxy()
+    {
+        var config = new PluginConfiguration { ProxyBypassList = "localhost" };
+        var env = new Dictionary<string, string?>(StringComparer.Ordinal);
+
+        FfmpegDownloader.ApplyProxyEnvironment(env, config);
+
+        Assert.Empty(env);
+    }
+
+    [Fact]
+    public void ApplyProxyEnvironment_PassesCredentialsThroughButRedactsThemFromTheReport()
+    {
+        var config = new PluginConfiguration { ProxyUrl = "  http://bob:hunter2@10.0.0.5:8080  " };
+        var env = new Dictionary<string, string?>(StringComparer.Ordinal);
+
+        var applied = FfmpegDownloader.ApplyProxyEnvironment(env, config);
+
+        // ffmpeg needs the real credentials; the log line must not have them.
+        Assert.Equal("http://bob:hunter2@10.0.0.5:8080", env["http_proxy"]);
+        Assert.Equal("http://***@10.0.0.5:8080", applied);
     }
 
     // ---------------------------------------------------------------- publishing

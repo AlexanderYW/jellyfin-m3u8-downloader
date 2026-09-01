@@ -43,6 +43,10 @@ public sealed class QueueWorkerTests : IDisposable
             OutputDirectory = _directory,
             MaxRetries = 3,
             RetryDelaySeconds = 600,
+
+            // Every job here is on one host, so the default courtesy gap would put a real
+            // five-second wall between them. The gap has its own test below.
+            DelayBetweenDownloadsSeconds = 0,
         };
     }
 
@@ -179,6 +183,10 @@ public sealed class QueueWorkerTests : IDisposable
     {
         _config.MaxConcurrentDownloads = 2;
 
+        // This test is about the global limit. Every job is on one host, so the per-host cap would
+        // otherwise be the binding constraint and hide what is being asserted.
+        _config.MaxConcurrentPerHost = 2;
+
         using var release = new SemaphoreSlim(0);
         var started = 0;
         _downloader.OnRun = async (job, _) =>
@@ -198,6 +206,114 @@ public sealed class QueueWorkerTests : IDisposable
 
             release.Release(4);
             await WaitForAsync(() => _queue.GetAll().All(j => j.Status == JobStatus.Completed));
+        }
+    }
+
+    [Fact]
+    public async Task MaxConcurrentPerHost_BoundsHowManyRunAgainstOneSite()
+    {
+        // The limit that actually prevents an IP block: several downloads at once is fine spread
+        // across sites, and is what gets you blocked when aimed at one.
+        _config.MaxConcurrentDownloads = 4;
+        _config.MaxConcurrentPerHost = 1;
+
+        using var release = new SemaphoreSlim(0);
+        var started = 0;
+        _downloader.OnRun = async (job, _) =>
+        {
+            Interlocked.Increment(ref started);
+            await release.WaitAsync();
+            return Path.Combine(_directory, job.RequestedFileName + ".mkv");
+        };
+
+        await using (await StartAsync())
+        {
+            _queue.AddRange(new[] { Job("a"), Job("b"), Job("c") });
+
+            await WaitForAsync(() => Volatile.Read(ref started) == 1);
+            await Task.Delay(250);
+            Assert.Equal(1, Volatile.Read(ref started));
+
+            release.Release(3);
+            await WaitForAsync(() => _queue.GetAll().All(j => j.Status == JobStatus.Completed));
+        }
+    }
+
+    [Fact]
+    public async Task RateLimited_PausesTheWholeHostRatherThanRetryingSoon()
+    {
+        // A remux cannot resume, so the ordinary retry re-requests the whole stream while the host
+        // is still refusing us -- which is how a temporary throttle becomes a lasting block. The
+        // pause has to cover the episodes queued behind it, not just the job that tripped it.
+        _config.RetryDelaySeconds = 1;
+        _config.RateLimitBackoffMinutes = 30;
+
+        var started = 0;
+        _downloader.OnRun = (_, _) =>
+        {
+            Interlocked.Increment(ref started);
+            throw new RateLimitedException("ffmpeg exited with code 1: HTTP error 429 Too Many Requests");
+        };
+
+        await using (await StartAsync())
+        {
+            _queue.AddRange(new[] { Job("first"), Job("second") });
+
+            await WaitForAsync(() => _queue.GetAll().Any(j => j.Attempts == 1));
+
+            // Long enough that the one-second retry delay would have fired, and that the second
+            // job would have been claimed had the pause applied only to the first.
+            await Task.Delay(500);
+            Assert.Equal(1, Volatile.Read(ref started));
+        }
+
+        var failed = _queue.GetAll().Single(j => j.Attempts == 1);
+        Assert.Equal(JobStatus.Queued, failed.Status);
+        Assert.NotNull(failed.NotBeforeUtc);
+
+        // The backoff, not RetryDelaySeconds.
+        Assert.True(failed.NotBeforeUtc > DateTime.UtcNow.AddMinutes(20));
+    }
+
+    [Fact]
+    public async Task OrdinaryFailure_StillUsesTheShortRetryDelay()
+    {
+        // The counterpart to the test above: only a rate limit earns the long pause.
+        _config.RetryDelaySeconds = 30;
+        _config.RateLimitBackoffMinutes = 30;
+
+        _downloader.OnRun = (_, _) => throw new InvalidOperationException("ffmpeg exited with code 1: Error muxing a packet");
+
+        await using (await StartAsync())
+        {
+            _queue.AddRange(new[] { Job("flaky") });
+            await WaitForAsync(() => Single().Attempts == 1);
+        }
+
+        Assert.True(Single().NotBeforeUtc < DateTime.UtcNow.AddMinutes(20));
+    }
+
+    [Fact]
+    public async Task DelayBetweenDownloads_SpacesConsecutiveJobsOnOneHost()
+    {
+        // A queue of episodes from one site must not arrive as one unbroken stream of requests.
+        _config.DelayBetweenDownloadsSeconds = 30;
+
+        var started = 0;
+        _downloader.OnRun = (job, _) =>
+        {
+            Interlocked.Increment(ref started);
+            return Task.FromResult(Path.Combine(_directory, job.RequestedFileName + ".mkv"));
+        };
+
+        await using (await StartAsync())
+        {
+            _queue.AddRange(new[] { Job("one"), Job("two") });
+
+            await WaitForAsync(() => Volatile.Read(ref started) == 1);
+            await Task.Delay(500);
+
+            Assert.Equal(1, Volatile.Read(ref started));
         }
     }
 

@@ -29,8 +29,25 @@ public interface IDownloadQueueService
     /// <param name="maxConcurrent">
     /// How many downloads may run at once. Nothing is claimed once that many are in flight.
     /// </param>
+    /// <param name="maxPerHost">
+    /// How many downloads may run against one hostname at once. A job whose host is already at
+    /// this limit, or is cooling down, is skipped rather than blocking the queue -- the next
+    /// runnable job on another host is claimed instead.
+    /// </param>
     /// <returns>The claimed job, or <c>null</c> when nothing is runnable right now.</returns>
-    DownloadJob? TryDequeueNext(int maxConcurrent);
+    DownloadJob? TryDequeueNext(int maxConcurrent, int maxPerHost = 1);
+
+    /// <summary>
+    /// Holds back every job on a URL's host until the given time has passed.
+    /// </summary>
+    /// <param name="url">Any URL on the host; only its hostname is used.</param>
+    /// <param name="duration">How long to wait. A non-positive value does nothing.</param>
+    /// <remarks>
+    /// Used both for the short courtesy gap between consecutive downloads from one site and for
+    /// the long pause after that site rate-limits us. An existing cooldown is only ever extended,
+    /// never cut short, so a five-second gap cannot cancel a thirty-minute backoff.
+    /// </remarks>
+    void CoolDownHost(string url, TimeSpan duration);
 
     /// <summary>
     /// Records live progress for a running job. Not persisted; flushed on the next transition.

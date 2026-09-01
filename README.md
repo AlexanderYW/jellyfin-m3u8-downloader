@@ -261,6 +261,10 @@ Everything except the output directory has a working default.
 | --- | --- | --- |
 | Output directory | *(empty)* | Required. Absolute path on the server. |
 | Simultaneous downloads | 1 | How many downloads run at once, up to 8. Each is its own ffmpeg process on the same disk. |
+| Simultaneous downloads per site | 1 | Applied on top of the limit above. See *Avoiding an IP block*. |
+| Speed limit | 10× realtime | Paces the fetch instead of pulling a stream flat out. `0` is no limit. See *Avoiding an IP block*. |
+| Pause between downloads | 5s | Gap before starting another download from the same site. Other sites are unaffected. |
+| Pause after being rate-limited | 30 min | How long every download from a site waits after it answers `429` or `403`. |
 | Maximum length | 0 (no limit) | Stops a download after this many minutes. Applies only to sources whose length ffmpeg cannot determine — the escape hatch for live streams, which never end on their own. |
 | Apply the maximum length to every download | off | Also caps sources of known length, truncating them. Off by default so a measured three-hour film is never silently cut short. |
 | Keep finished jobs for | 0 (forever) | Days of history to keep. Finished entries older than this are dropped from the list; files are never deleted. |
@@ -269,12 +273,55 @@ Everything except the output directory has a working default.
 | Stall timeout | 10 min | Kills a download that has made no progress at all for this long and retries it. 0 disables it. |
 | User-Agent | *(empty)* | Some hosts require a browser-like value. |
 | Referer | *(empty)* | Some hosts reject requests without one. |
-| Reuse HTTP connections | off | See *Troubleshooting* — leave off unless downloads are slow. |
+| HTTP proxy | *(empty)* | Routes downloads through a proxy, e.g. `http://10.0.0.5:8080` or `http://user:pass@10.0.0.5:8080`. Applies to this plugin's downloads only, not to the rest of Jellyfin. Must be an `http://` URL even for https streams — ffmpeg has no SOCKS support. |
+| Proxy bypass list | *(empty)* | Comma-separated hosts that skip the proxy, e.g. `localhost,127.0.0.1,.lan`. |
+| Skip damaged packets | on | Drops the partial frame a truncated segment leaves behind, so the download finishes with a brief glitch instead of failing. See *Troubleshooting*. |
+| Reuse HTTP connections | **on** | Leave on — see *Avoiding an IP block*. Turn it off only for a CDN that rotates hostnames per segment. |
 | Extra ffmpeg **input** arguments | *(empty)* | Placed before `-i`. Reconnect/HLS options only work here. |
 | Extra ffmpeg **output** arguments | *(empty)* | Inserted before the output path. Quote values with spaces. |
 | Notify library after download | on | Points Jellyfin at the finished file so it appears without a manual scan. |
 
 ## Troubleshooting
+
+### The site blocked my IP
+
+A single download can generate traffic that looks exactly like a scraper. Four separate behaviours
+used to stack up, and the defaults now guard against all of them:
+
+**One download used to fetch every quality at once.** An HLS master playlist lists each bitrate as
+its own video stream. The plugin picks the best one from what `ffprobe` reports — but when the probe
+failed, the fallback selected *every* video stream, and ffmpeg's HLS demuxer then downloaded four to
+six variant playlists **simultaneously** from the same host. That alone is enough to trip a limiter.
+A failed probe on an HLS source now maps nothing at all and lets ffmpeg choose a single video track.
+The cost is that extra audio tracks and subtitles are not kept in that case; the probe succeeding is
+the normal path and is unaffected.
+
+**Every segment used to open a new connection.** `Reuse HTTP connections` now defaults to **on**.
+Without it, a two-hour stream means roughly 1200 fresh TCP and TLS handshakes, and connection rate is
+one of the first things a rate limiter counts.
+
+**Nothing paced the fetch.** `Speed limit` now defaults to 10× realtime, so a two-hour stream takes
+about twelve minutes as a steady trickle rather than arriving in two minutes as one dense burst.
+Drop it to `2` or `3` for a site that has already blocked you.
+
+**A rate limit used to trigger more requests.** A `429` or `403` now pauses *every* queued download
+from that site for 30 minutes, rather than retrying in 30 seconds. This matters because a download
+cannot resume part-way — the retry re-requests the whole stream from the first segment, while the
+site is still refusing you, which is how a temporary throttle becomes a lasting block.
+
+If you are upgrading an existing installation, open the plugin settings and **tick "Reuse HTTP
+connections" by hand**. The new default only applies to fresh installs: your saved configuration
+already has it off, and nothing can tell that apart from a deliberate choice.
+
+If a site blocks you anyway, in rough order of effect: lower the speed limit to `2`, raise the pause
+between downloads, and set a browser-like **User-Agent** and a **Referer**.
+
+If the block is by IP rather than by behaviour, set an **HTTP proxy** in Advanced settings. It
+applies to this plugin's downloads only, so the rest of the server keeps its own connection.
+
+> The speed limit uses ffmpeg's `-readrate`, which needs ffmpeg 5.1 or newer. Every Jellyfin 10.9+
+> bundle has it. If your server uses an older ffmpeg and downloads fail with `Option not found`, set
+> the speed limit to `0`.
 
 ### `Cannot reuse HTTP connection for different host` / `Stream ends prematurely`
 
@@ -297,7 +344,25 @@ the box:
 | --- | --- | --- |
 | `-reconnect`, `-reconnect_streamed`, `-reconnect_on_network_error` | **off** | A dropped TLS connection mid-segment ends the download instead of retrying. |
 | `-seg_max_retry` | **0** | A single truncated segment aborts everything rather than being re-fetched. |
-| `-http_persistent` | **on** | Connection reuse is what breaks on rotating-hostname CDNs. |
+| `-http_persistent` | **on** | Connection reuse is what breaks on rotating-hostname CDNs. Left alone unless you turn **Reuse HTTP connections** off. |
+| `-fflags +discardcorrupt`, `-err_detect ignore_err` | **off** | The partial frame at the end of a truncated segment reaches the muxer and kills the download. |
+
+The first three make ffmpeg re-fetch a truncated segment. **Skip damaged packets** is the last
+resort for when re-fetching does not help — some hosts truncate the same segment on every attempt,
+and retrying only reproduces the failure. With it on, the damaged packets are discarded and the
+rest of the stream is written: you get a file with a brief glitch where each truncated segment
+ends, instead of no file at all. Turn it off if you would rather such a download failed loudly.
+
+That still leaves one gap, and the plugin closes it automatically. `+discardcorrupt` can only drop
+packets the demuxer *flagged* as damaged, and a segment cut at a TLS record boundary often arrives
+structurally valid — so nothing is flagged, the partial ADTS frame reaches `aac_adtstoasc` anyway,
+and the mux dies at the same point on every retry. When a download fails with `aac_adtstoasc`
+followed by `Error applying bitstream filters`, the plugin retries it once with the audio
+re-encoded (`-c:a aac`) instead of copied. That takes the bitstream filter out of the path
+entirely: the decoder skips what it cannot parse and the encoder emits well-formed frames. Video
+and subtitles are still copied, so the cost is the audio re-encode and a second pass over the
+stream. The fallback is skipped when the failure looks like a rate limit, since re-encoding cannot
+help a host that is refusing you.
 
 If it still fails, try in **Extra ffmpeg input arguments**:
 
@@ -321,9 +386,14 @@ restore the old behaviour of waiting forever.
 
 ### Downloads are unusually slow
 
-Turn **Reuse HTTP connections** on. It restores ffmpeg's default connection reuse, which avoids a
-TLS handshake per segment. Safe on CDNs that serve every segment from one hostname; if the
-`Cannot reuse HTTP connection` error returns, turn it back off.
+First check the **Speed limit**. It defaults to 10× realtime, so a two-hour stream takes about
+twelve minutes on purpose — see *The site blocked my IP* for why. Raise it, or set it to `0` for no
+limit, if the site tolerates that.
+
+Then check that **Reuse HTTP connections** is on. It should be by default, but an installation
+upgraded from an older version keeps its saved `off`, which costs a TLS handshake per segment. If
+the `Cannot reuse HTTP connection` error appears after turning it on, that CDN rotates hostnames and
+you have to leave it off.
 
 ### The queue table is frozen / buttons do nothing
 
@@ -353,7 +423,7 @@ fast and lossless. ffprobe is asked for the duration up front to drive the progr
 stream with no duration (a live stream) simply reports elapsed time instead, and **Maximum length**
 is what stops one.
 
-The probe is sent the same User-Agent and Referer as the download. A host that gates on those would
+The probe is sent the same User-Agent, Referer and proxy as the download. A host that gates on those would
 otherwise reject the probe while accepting the download — and a failed probe is not merely cosmetic,
 because without a program to map, stream selection falls back to copying *every* bitrate rendition
 (see below).
@@ -367,6 +437,14 @@ audio and subtitle tracks, and groups each rendition with those shared tracks in
 when the source has more than one program, the plugin maps the program holding the
 highest-resolution video (`-map 0:p:<n> -dn`). Otherwise — a plain media playlist, or a non-HLS
 input — it maps every stream by type (`-map 0:v? -map 0:a? -map 0:s?`).
+
+There is a third case. When `ffprobe` fails outright, nothing is known about the structure, and
+mapping by type would then be actively harmful on a master playlist: `0:v?` selects every bitrate
+rendition, and ffmpeg's HLS demuxer fetches all of them at once — which reads as a scraper and gets
+your IP blocked. So a failed probe on an HLS source maps **nothing**, leaving ffmpeg's own default
+selection to take one video, one audio and one subtitle. That gives up the extra audio tracks, and
+it is the right trade: a probe that just failed is exactly when the host is already unhappy with
+you.
 
 Measured on Apple's test stream (10s sample), this matters:
 
@@ -389,6 +467,11 @@ alongside the plugin's own.
 **Simultaneous downloads** is 1 by default, which is how the plugin has always behaved. Raising it
 starts that many ffmpeg processes at once; because each writes to the same disk, more is not
 reliably faster.
+
+**Simultaneous downloads per site** is applied on top of that and defaults to 1. Several downloads
+at once is ordinary when spread across different sites, and is what gets your IP blocked when aimed
+at one. A site that is already at its limit does not stall the queue — the worker walks past its
+jobs in queue order and claims the next one that is runnable.
 
 Output names are claimed before the download starts rather than when ffmpeg opens the file: the
 probe alone can take a minute, which is long enough for a second job with the same name to pick the

@@ -226,6 +226,14 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
     /// Whether the probe found a duration. Gates the length cap; see the remarks on
     /// <see cref="PluginConfiguration.MaxDurationMinutes"/>.
     /// </param>
+    /// <param name="probeSucceeded">
+    /// Whether ffprobe described the source at all. Distinguishes "one program, nothing to choose
+    /// between" from "we know nothing"; see the remarks on stream selection.
+    /// </param>
+    /// <param name="reencodeAudio">
+    /// Whether to decode and re-encode the audio instead of copying it. The fallback path only;
+    /// see <see cref="IsAudioBitstreamFailure"/> for the failure it exists to recover from.
+    /// </param>
     /// <returns>Arguments in order, each already a separate argv entry.</returns>
     /// <remarks>
     /// Pure and static so the argument construction can be asserted in tests without spawning a
@@ -238,7 +246,9 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
         PluginConfiguration config,
         int? bestProgramId = null,
         bool isHls = false,
-        bool hasKnownDuration = false)
+        bool hasKnownDuration = false,
+        bool probeSucceeded = false,
+        bool reencodeAudio = false)
     {
         ArgumentNullException.ThrowIfNull(config);
 
@@ -271,6 +281,18 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
         args.Add("-reconnect_delay_max");
         args.Add("30");
 
+        if (config.MaxSpeedMultiplier > 0)
+        {
+            // Paces reading against the input's own timestamps, so on HLS it throttles how fast
+            // segments are fetched. Without it ffmpeg pulls a two-hour stream as fast as the pipe
+            // allows -- a dense burst of hundreds of requests in a couple of minutes, which is the
+            // shape a rate limiter is built to catch.
+            //
+            // Invariant formatting matters: a locale that writes "10,5" would be rejected outright.
+            args.Add("-readrate");
+            args.Add(config.MaxSpeedMultiplier.ToString("0.####", CultureInfo.InvariantCulture));
+        }
+
         if (isHls)
         {
             // HLS-demuxer options. Gated on isHls because ffmpeg rejects the whole input with
@@ -283,13 +305,34 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
 
             if (!config.ReuseHttpConnections)
             {
-                // Defaults to on. CDNs that rotate the hostname per segment then produce
-                // "Cannot reuse HTTP connection for different host", truncated segments, and a
-                // failed mux. Reconnecting per segment costs a handshake and avoids the class
-                // of failure entirely.
+                // The opt-out, for CDNs that rotate the hostname per segment: keep-alive there
+                // produces "Cannot reuse HTTP connection for different host", truncated segments,
+                // and a failed mux, and a fresh connection per segment avoids that class of
+                // failure entirely.
+                //
+                // It is the opt-out rather than the default because the cost is steep on every
+                // other host: a two-hour stream at six-second segments means about 1200 fresh
+                // TCP+TLS handshakes, and connection rate is exactly what a limiter counts.
                 args.Add("-http_persistent");
                 args.Add("0");
             }
+        }
+
+        if (config.TolerateCorruptSegments)
+        {
+            // A host that truncates a segment ("Stream ends prematurely at N, should be M") leaves
+            // a partial frame at its end. Without these the demuxer hands that frame on, the
+            // Matroska muxer's aac_adtstoasc filter rejects it, and the whole download dies at
+            // whatever point the first bad segment landed -- after which retrying just truncates
+            // the same segment again.
+            //
+            // discardcorrupt drops the packets the demuxer already flagged as damaged, so nothing
+            // invalid reaches the muxer; ignore_err keeps the demuxer going past the errors that
+            // produced them. A stream with no damaged packets is unaffected by either.
+            args.Add("-err_detect");
+            args.Add("ignore_err");
+            args.Add("-fflags");
+            args.Add("+discardcorrupt");
         }
 
         args.AddRange(SplitArguments(config.ExtraInputArgs));
@@ -315,6 +358,24 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
             args.Add(string.Create(CultureInfo.InvariantCulture, $"0:p:{bestProgramId.Value}"));
             args.Add("-dn");
         }
+        else if (isHls && !probeSucceeded)
+        {
+            // Nothing is mapped at all: ffmpeg's own default selection takes one video (the
+            // highest resolution it can see), one audio and one subtitle.
+            //
+            // This case is a failed probe on an HLS source, where we know nothing about the
+            // structure. Falling through to the per-type mapping below would be actively
+            // dangerous here: on a master playlist every bitrate rendition is its own video
+            // stream, so "0:v?" selects all of them and the HLS demuxer fetches four to six
+            // variant playlists *simultaneously* from one host -- which reads as a scraper and
+            // gets the server's IP blocked.
+            //
+            // The cost is the extra audio tracks and subtitles a program map would have kept.
+            // That is the right way round: a probe that just failed is precisely when the host is
+            // already unhappy with us, and a missing dub track is cheaper than a ban. When the
+            // probe succeeds the mapping below is used as before, because a source ffprobe
+            // described as having fewer than two programs has no renditions to fan out across.
+        }
         else
         {
             // No usable program structure (a plain media playlist, or a non-HLS input): take every
@@ -331,6 +392,21 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
         // Remux without re-encoding: fast, lossless, and the whole point of choosing Matroska.
         args.Add("-c");
         args.Add("copy");
+
+        if (reencodeAudio)
+        {
+            // The fallback after a mux that died inside aac_adtstoasc. Copying AAC into Matroska
+            // forces that filter, and it has no tolerance for the half frame a truncated segment
+            // ends on: one bad frame kills the whole output. Decoding and re-encoding removes the
+            // filter from the path entirely -- the decoder skips what it cannot parse and the
+            // encoder emits well-formed frames -- so the download completes with a glitch where
+            // each truncated segment landed instead of failing at the first one.
+            //
+            // Placed after "-c copy" so it overrides only the audio codec: video and subtitles are
+            // still copied, and ffmpeg's native AAC encoder needs no external library.
+            args.Add("-c:a");
+            args.Add("aac");
+        }
 
         // A live stream has no duration and so no end: ffmpeg would keep recording until the disk
         // fills. Placed before the user's own output args so an explicit -t there still wins.
@@ -389,6 +465,69 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
         args.Add(url);
 
         return args;
+    }
+
+    /// <summary>
+    /// Determines whether a configured proxy value is one ffmpeg can actually use.
+    /// </summary>
+    /// <param name="value">The configured proxy URL.</param>
+    /// <returns><c>true</c> when the value is an absolute <c>http</c> URL.</returns>
+    /// <remarks>
+    /// ffmpeg only speaks to HTTP proxies, and reaches them over plain HTTP even for an
+    /// <c>https</c> stream, which it tunnels with <c>CONNECT</c>. A <c>socks5://</c> or
+    /// <c>https://</c> value would be accepted silently by the environment and then ignored -- or
+    /// worse, misparsed -- so it is rejected here where it can be reported instead.
+    /// </remarks>
+    public static bool IsUsableProxyUrl(string? value)
+    {
+        return !string.IsNullOrWhiteSpace(value)
+            && Uri.TryCreate(value.Trim(), UriKind.Absolute, out var uri)
+            && string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Applies the configured proxy to a child process environment.
+    /// </summary>
+    /// <param name="environment">The child process environment to modify.</param>
+    /// <param name="config">Current plugin settings.</param>
+    /// <returns>
+    /// A redacted description of the proxy that was applied, or <c>null</c> when none was
+    /// configured or the configured value was unusable.
+    /// </returns>
+    /// <remarks>
+    /// The proxy travels as an environment variable rather than ffmpeg's <c>-http_proxy</c> input
+    /// option deliberately. The option applies to the input ffmpeg opens directly, which leaves
+    /// every nested HTTP request an HLS playlist makes -- segments, AES key URIs, variant playlists
+    /// -- going out unproxied; the environment variable covers all of them. Both the lowercase and
+    /// uppercase spellings are set because different builds and helper tools read different ones.
+    ///
+    /// Setting this on the child only is the whole point: the rest of the server keeps its own
+    /// networking.
+    /// </remarks>
+    public static string? ApplyProxyEnvironment(IDictionary<string, string?> environment, PluginConfiguration config)
+    {
+        ArgumentNullException.ThrowIfNull(environment);
+        ArgumentNullException.ThrowIfNull(config);
+
+        if (!IsUsableProxyUrl(config.ProxyUrl))
+        {
+            return null;
+        }
+
+        var proxy = config.ProxyUrl.Trim();
+        environment["http_proxy"] = proxy;
+        environment["https_proxy"] = proxy;
+        environment["HTTP_PROXY"] = proxy;
+        environment["HTTPS_PROXY"] = proxy;
+
+        if (!string.IsNullOrWhiteSpace(config.ProxyBypassList))
+        {
+            var bypass = config.ProxyBypassList.Trim();
+            environment["no_proxy"] = bypass;
+            environment["NO_PROXY"] = bypass;
+        }
+
+        return RedactProxy(proxy);
     }
 
     /// <summary>
@@ -571,6 +710,56 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
         SourceInfo source,
         CancellationToken cancellationToken)
     {
+        var (error, audioBitstream) = await RunFfmpegAttemptAsync(
+            job, config, tempPath, source, reencodeAudio: false, cancellationToken).ConfigureAwait(false);
+
+        if (audioBitstream)
+        {
+            // Retrying the copy verbatim would fail at the same frame, so the one retry that has
+            // any chance is a different command. See IsAudioBitstreamFailure for why this is the
+            // only failure worth spending an extra full download on: everything else either
+            // succeeds on a plain retry or would not have been fixed by re-encoding either.
+            _logger.LogWarning(
+                "Download {JobId} failed while copying its audio into Matroska; retrying once with the audio re-encoded.",
+                job.Id);
+
+            (error, _) = await RunFfmpegAttemptAsync(
+                job, config, tempPath, source, reencodeAudio: true, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (error is not null)
+        {
+            throw error;
+        }
+    }
+
+    /// <summary>
+    /// Runs ffmpeg once and reports how it ended.
+    /// </summary>
+    /// <param name="job">The job being downloaded.</param>
+    /// <param name="config">Current plugin settings.</param>
+    /// <param name="tempPath">The reserved <c>.part</c> path ffmpeg writes to.</param>
+    /// <param name="source">What the probe found.</param>
+    /// <param name="reencodeAudio">Whether this is the re-encoding fallback attempt.</param>
+    /// <param name="cancellationToken">Cancels the download.</param>
+    /// <returns>
+    /// The failure to raise, or <c>null</c> on success, together with whether that failure was the
+    /// audio bitstream filter. Returned rather than thrown so the caller can decide to try again;
+    /// a cancellation or a stall still throws, because neither is retryable here.
+    /// </returns>
+    /// <remarks>
+    /// Each attempt is a fresh ffmpeg writing the same <c>.part</c> from the start -- the argument
+    /// list ends in <c>-y</c>, so the abandoned partial output is overwritten rather than appended
+    /// to.
+    /// </remarks>
+    private async Task<(Exception? Error, bool AudioBitstream)> RunFfmpegAttemptAsync(
+        DownloadJob job,
+        PluginConfiguration config,
+        string tempPath,
+        SourceInfo source,
+        bool reencodeAudio,
+        CancellationToken cancellationToken)
+    {
         var startInfo = new ProcessStartInfo
         {
             FileName = _mediaEncoder.EncoderPath,
@@ -587,10 +776,14 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
             config,
             source.BestProgramId,
             source.IsHls,
-            source.DurationSeconds is > 0))
+            source.DurationSeconds is > 0,
+            source.ProbeSucceeded,
+            reencodeAudio))
         {
             startInfo.ArgumentList.Add(arg);
         }
+
+        ApplyProxy(startInfo, config);
 
         _logger.LogInformation("Starting m3u8 download {JobId} to {Path}", job.Id, tempPath);
         _logger.LogDebug("ffmpeg {Path} {Args}", startInfo.FileName, string.Join(' ', startInfo.ArgumentList));
@@ -641,11 +834,25 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
 
         await WaitQuietlyAsync(stdoutTask, stderrTask).ConfigureAwait(false);
 
-        if (process.ExitCode != 0)
+        if (process.ExitCode == 0)
         {
-            throw new InvalidOperationException(
-                string.Create(CultureInfo.InvariantCulture, $"ffmpeg exited with code {process.ExitCode}: {Describe(stderrTail)}"));
+            return (null, false);
         }
+
+        var message = string.Create(
+            CultureInfo.InvariantCulture,
+            $"ffmpeg exited with code {process.ExitCode}: {Describe(stderrTail)}");
+
+        // Same message either way; the type is what tells the worker to back off across the
+        // whole host instead of retrying this job in a few seconds.
+        Exception error = IsRateLimited(stderrTail)
+            ? new RateLimitedException(message)
+            : new InvalidOperationException(message);
+
+        // A rate limit outranks the bitstream check: re-encoding cannot help a host that is
+        // refusing us, and the second attempt would only spend more of the budget it is angry
+        // about. The fallback is also pointless on the attempt that already used it.
+        return (error, !reencodeAudio && error is not RateLimitedException && IsAudioBitstreamFailure(stderrTail));
     }
 
     /// <summary>
@@ -704,6 +911,95 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
     private static string Describe(Queue<string> stderrTail) => stderrTail.Count > 0
         ? string.Join(Environment.NewLine, stderrTail)
         : "no diagnostic output";
+
+    /// <summary>
+    /// Decides whether a failure was the host refusing us rather than anything about the stream.
+    /// </summary>
+    /// <param name="stderr">The tail of ffmpeg's stderr.</param>
+    /// <returns><c>true</c> when the output names a rate-limit or forbidden response.</returns>
+    /// <remarks>
+    /// Public and static for the same reason as <see cref="ParseProgressLine"/>: the interesting
+    /// behaviour is the classification, and it should be assertable without spawning a process.
+    ///
+    /// Matching on ffmpeg's text is unavoidable -- it surfaces no status code through any other
+    /// channel -- so this errs towards the phrasings ffmpeg actually emits
+    /// ("Server returned 403 Forbidden", "HTTP error 429 Too Many Requests") rather than trying to
+    /// catch every 4xx. A false negative simply falls back to the ordinary retry, which is what
+    /// happened before this existed; a false positive would park a job for the whole backoff over
+    /// something unrelated, which is the worse mistake.
+    /// </remarks>
+    public static bool IsRateLimited(IEnumerable<string> stderr)
+    {
+        ArgumentNullException.ThrowIfNull(stderr);
+
+        foreach (var line in stderr)
+        {
+            if (string.IsNullOrEmpty(line))
+            {
+                continue;
+            }
+
+            // 429 is unambiguous. 403 is included because hosts overwhelmingly answer a tripped
+            // rate limit with it rather than 429, and a genuinely forbidden URL is not something
+            // retrying sooner would have fixed either.
+            if (line.Contains("429", StringComparison.Ordinal)
+                || line.Contains("Too Many Requests", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("403", StringComparison.Ordinal)
+                || line.Contains("Forbidden", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Decides whether a failure was the audio bitstream filter choking on a damaged frame.
+    /// </summary>
+    /// <param name="stderr">The tail of ffmpeg's stderr.</param>
+    /// <returns><c>true</c> when the mux died inside <c>aac_adtstoasc</c>.</returns>
+    /// <remarks>
+    /// This is the one failure mode that neither retrying nor
+    /// <see cref="PluginConfiguration.TolerateCorruptSegments"/> reliably clears. A host that
+    /// truncates a segment leaves a partial ADTS frame at its end; if the demuxer does not flag
+    /// the packets as corrupt -- and on a segment cut at a TLS record boundary it often does not,
+    /// because the bytes that arrived are structurally valid -- <c>+discardcorrupt</c> has nothing
+    /// to drop, and the frame reaches the <c>aac_adtstoasc</c> filter that copying AAC into
+    /// Matroska requires. That filter fails the whole mux on it, at exactly the same point on
+    /// every retry.
+    ///
+    /// Matched narrowly on the filter's own name together with the muxer's complaint, so an
+    /// unrelated "Invalid data found" cannot trigger a pointless re-encode. Anything not matched
+    /// here just takes the ordinary retry, which is the behaviour that predates this.
+    /// </remarks>
+    public static bool IsAudioBitstreamFailure(IEnumerable<string> stderr)
+    {
+        ArgumentNullException.ThrowIfNull(stderr);
+
+        var sawFilter = false;
+        var sawMuxFailure = false;
+
+        foreach (var line in stderr)
+        {
+            if (string.IsNullOrEmpty(line))
+            {
+                continue;
+            }
+
+            if (line.Contains("aac_adtstoasc", StringComparison.OrdinalIgnoreCase))
+            {
+                sawFilter = true;
+            }
+
+            if (line.Contains("Error applying bitstream filters", StringComparison.OrdinalIgnoreCase))
+            {
+                sawMuxFailure = true;
+            }
+        }
+
+        return sawFilter && sawMuxFailure;
+    }
 
     /// <summary>
     /// Reads ffmpeg's progress stream and pushes positions into the queue.
@@ -788,6 +1084,8 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
             startInfo.ArgumentList.Add(arg);
         }
 
+        ApplyProxy(startInfo, config);
+
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(_probeTimeout);
 
@@ -826,7 +1124,8 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
             return new SourceInfo(
                 ReadDuration(document.RootElement),
                 ReadBestProgramId(document.RootElement),
-                ReadIsHls(document.RootElement) || LooksLikeHlsUrl(url));
+                ReadIsHls(document.RootElement) || LooksLikeHlsUrl(url),
+                ProbeSucceeded: true);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -859,6 +1158,56 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
             args.Add("-headers");
             args.Add("Referer: " + config.Referer + "\r\n");
         }
+    }
+
+    /// <summary>
+    /// Points a child process at the configured proxy, reporting a value that cannot be used.
+    /// </summary>
+    /// <param name="startInfo">The child process about to be started.</param>
+    /// <param name="config">Current plugin settings.</param>
+    /// <remarks>
+    /// Reading <see cref="ProcessStartInfo.Environment"/> seeds it from this process, so the child
+    /// still inherits everything the server was started with; only the proxy variables are added.
+    ///
+    /// A proxy that cannot be parsed is reported and skipped rather than thrown: a typo in a
+    /// settings field should not turn every queued download into a failure, and a silent fallback
+    /// to a direct connection is exactly the surprise a proxy user does not want.
+    /// </remarks>
+    private void ApplyProxy(ProcessStartInfo startInfo, PluginConfiguration config)
+    {
+        var proxy = ApplyProxyEnvironment(startInfo.Environment, config);
+
+        if (proxy is not null)
+        {
+            _logger.LogDebug("Routing through HTTP proxy {Proxy}", proxy);
+        }
+        else if (!string.IsNullOrWhiteSpace(config.ProxyUrl))
+        {
+            _logger.LogWarning(
+                "Ignoring the configured proxy: it must be an absolute http:// URL, and ffmpeg does not support SOCKS proxies.");
+        }
+    }
+
+    /// <summary>
+    /// Strips any credentials from a proxy URL so it can be logged.
+    /// </summary>
+    /// <param name="proxy">The proxy URL.</param>
+    /// <returns>The URL with any <c>user:pass@</c> replaced by <c>***@</c>.</returns>
+    private static string RedactProxy(string proxy)
+    {
+        var schemeEnd = proxy.IndexOf("://", StringComparison.Ordinal);
+        if (schemeEnd < 0)
+        {
+            return proxy;
+        }
+
+        // Only the userinfo section can carry a password, and it ends at the first '@' of the
+        // authority -- which is also the last one, since '@' is not legal in a host.
+        var authority = schemeEnd + 3;
+        var at = proxy.IndexOf('@', authority);
+        return at < 0
+            ? proxy
+            : string.Concat(proxy.AsSpan(0, authority), "***", proxy.AsSpan(at));
     }
 
     /// <summary>
