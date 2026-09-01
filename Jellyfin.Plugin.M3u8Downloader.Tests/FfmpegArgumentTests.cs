@@ -150,7 +150,7 @@ public class FfmpegArgumentTests
     [InlineData("out_time=00:00:30.5", 30.5d)]
     public void ParseProgressLine_ReadsPosition(string line, double expected)
     {
-        var sample = FfmpegDownloader.ParseProgressLine(line);
+        var sample = FfmpegOutputClassifier.ParseProgressLine(line);
 
         Assert.Equal(expected, sample.PositionSeconds);
         Assert.Null(sample.SpeedRatio);
@@ -162,7 +162,7 @@ public class FfmpegArgumentTests
     [InlineData("speed=0.5x", 0.5d)]
     public void ParseProgressLine_ReadsSpeed(string line, double expected)
     {
-        var sample = FfmpegDownloader.ParseProgressLine(line);
+        var sample = FfmpegOutputClassifier.ParseProgressLine(line);
 
         Assert.Equal(expected, sample.SpeedRatio);
         Assert.Null(sample.PositionSeconds);
@@ -180,7 +180,7 @@ public class FfmpegArgumentTests
     [InlineData("=5")]
     public void ParseProgressLine_IgnoresEverythingElse(string? line)
     {
-        Assert.False(FfmpegDownloader.ParseProgressLine(line).HasValue);
+        Assert.False(FfmpegOutputClassifier.ParseProgressLine(line).HasValue);
     }
 
     [Fact]
@@ -441,7 +441,7 @@ public class FfmpegArgumentTests
     [InlineData("Server returned 429 Too Many Requests")]
     public void IsRateLimited_RecognisesAHostRefusingUs(string line)
     {
-        Assert.True(FfmpegDownloader.IsRateLimited(new[] { "Opening 'https://example.com/1.ts'", line }));
+        Assert.True(FfmpegOutputClassifier.IsRateLimited(new[] { "Opening 'https://example.com/1.ts'", line }));
     }
 
     [Theory]
@@ -459,13 +459,13 @@ public class FfmpegArgumentTests
     [InlineData("")]
     public void IsRateLimited_LeavesOrdinaryFailuresToTheNormalRetry(string line)
     {
-        Assert.False(FfmpegDownloader.IsRateLimited(new[] { line }));
+        Assert.False(FfmpegOutputClassifier.IsRateLimited(new[] { line }));
     }
 
     [Fact]
     public void IsRateLimited_EmptyOutput_IsNotARateLimit()
     {
-        Assert.False(FfmpegDownloader.IsRateLimited(Array.Empty<string>()));
+        Assert.False(FfmpegOutputClassifier.IsRateLimited(Array.Empty<string>()));
     }
 
     [Fact]
@@ -500,7 +500,7 @@ public class FfmpegArgumentTests
             "[out#0/matroska @ 0x55] Error muxing a packet",
         };
 
-        Assert.True(FfmpegDownloader.IsAudioBitstreamFailure(stderr));
+        Assert.True(FfmpegOutputClassifier.IsAudioBitstreamFailure(stderr));
     }
 
     [Theory]
@@ -511,13 +511,13 @@ public class FfmpegArgumentTests
     public void IsAudioBitstreamFailure_NeedsBothHalvesOfTheSignature(string line)
     {
         // Either half alone is too weak to justify spending a second full download on.
-        Assert.False(FfmpegDownloader.IsAudioBitstreamFailure(new[] { line }));
+        Assert.False(FfmpegOutputClassifier.IsAudioBitstreamFailure(new[] { line }));
     }
 
     [Fact]
     public void IsAudioBitstreamFailure_EmptyOutput_IsNotABitstreamFailure()
     {
-        Assert.False(FfmpegDownloader.IsAudioBitstreamFailure(Array.Empty<string>()));
+        Assert.False(FfmpegOutputClassifier.IsAudioBitstreamFailure(Array.Empty<string>()));
     }
 
     // ---------------------------------------------------------------- probe arguments

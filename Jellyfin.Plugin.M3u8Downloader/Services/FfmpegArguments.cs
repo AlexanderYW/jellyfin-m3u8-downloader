@@ -43,7 +43,7 @@ public static class FfmpegArguments
     /// </param>
     /// <param name="reencodeAudio">
     /// Whether to decode and re-encode the audio instead of copying it. The fallback path only;
-    /// see <see cref="FfmpegDownloader.IsAudioBitstreamFailure"/> for the failure it exists to recover from.
+    /// see <see cref="FfmpegOutputClassifier.IsAudioBitstreamFailure"/> for the failure it exists to recover from.
     /// </param>
     /// <returns>Arguments in order, each already a separate argv entry.</returns>
     /// <remarks>
