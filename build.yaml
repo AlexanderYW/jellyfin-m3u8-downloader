@@ -1,7 +1,7 @@
 ---
 name: "M3U8 Downloader"
 guid: "6f0f4a1e-6c4e-4d2a-9f3b-1c8a5d7e2b40"
-version: "1.0.0.0"
+version: "0.0.0"
 targetAbi: "10.11.0.0"
 framework: "net9.0"
 owner: "alexanderwennerstrom"
@@ -11,6 +11,7 @@ description: >
   them to MKV one at a time in the background using the server's own ffmpeg. The queue survives
   restarts and retries failed downloads.
 category: "General"
+imageUrl: "https://github.com/AlexanderYW/jellyfin-m3u8-downloader/raw/main/logo.png"
 artifacts:
   - "Jellyfin.Plugin.M3u8Downloader.dll"
 changelog: >

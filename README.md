@@ -31,11 +31,10 @@ and every later version — from the Dashboard, no manual file copying:
 
 1. Dashboard → Plugins → Repositories → **+**
 2. Name: `M3U8 Downloader`, URL:
-   `https://github.com/OWNER/REPO/raw/main/manifest.json`
+   `https://github.com/AlexanderYW/jellyfin-m3u8-downloader/raw/main/manifest.json`
 3. Dashboard → Plugins → Catalog → install **M3U8 Downloader**, then restart Jellyfin.
 
 Jellyfin polls that manifest, so new releases show up as available updates on their own.
-Replace `OWNER/REPO` with this repository's path.
 
 ## Releasing
 
@@ -62,9 +61,9 @@ To force a release with no releasable commits (or a larger bump than the commits
 CI rejects a pull request whose commits are not Conventional Commits, since a malformed subject
 would silently drop out of the version calculation.
 
-Plugin metadata in the manifest (name, description, GUID, `targetAbi`) comes from `build.yaml` —
-edit it there, not in `manifest.json`. The `version:` line in `build.yaml` is overwritten at release
-time and is only the fallback starting point before the first tag exists.
+Plugin metadata in the manifest (name, description, GUID, `targetAbi`, `imageUrl`) comes from
+`build.yaml` — edit it there, not in `manifest.json`. The `version:` line in `build.yaml` is
+overwritten at release time and is only the fallback starting point before the first tag exists.
 
 ## Installing on a server
 

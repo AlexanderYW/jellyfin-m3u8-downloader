@@ -53,7 +53,7 @@ def main() -> int:
         "overview": meta.get("overview", "").strip(),
         "owner": meta.get("owner", ""),
         "category": meta.get("category", "General"),
-        "imageUrl": existing.get("imageUrl", ""),
+        "imageUrl": meta.get("imageUrl") or existing.get("imageUrl", ""),
         "versions": existing.get("versions", []),
     }
     if index is None:
