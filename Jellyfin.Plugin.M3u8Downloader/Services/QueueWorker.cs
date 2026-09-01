@@ -330,7 +330,16 @@ public sealed class QueueWorker : BackgroundService
             // has no resume point -- while the host is still angry, which is how a soft throttle
             // turns into a lasting block. Back the whole host off instead, so the other episodes
             // queued behind this one wait too.
-            var backoff = TimeSpan.FromMinutes(Math.Max(0, config.RateLimitBackoffMinutes));
+            // Escalated by attempt and jittered: a host that refuses us three times running should
+            // not be probed on the same schedule that already failed twice, and the cooldown is
+            // per host, so without the spread every job queued behind this one becomes runnable at
+            // the same instant and arrives as the very burst that tripped the limiter.
+            var backoff = RetryBackoff.ForRateLimit(
+                TimeSpan.FromMinutes(Math.Max(0, config.RateLimitBackoffMinutes)),
+                job.Attempts + 1,
+                RetryBackoff.DefaultJitterFraction,
+                Random.Shared);
+
             _queue.CoolDownHost(job.Url, backoff);
 
             var requeued = _queue.MarkAttemptFailed(
@@ -341,10 +350,10 @@ public sealed class QueueWorker : BackgroundService
 
             _logger.LogWarning(
                 ex,
-                "M3u8 download {JobId} was rate-limited by {Host}; pausing downloads from that host for {Minutes} minute(s)",
+                "M3u8 download {JobId} was rate-limited by {Host}; pausing downloads from that host for {Minutes:F1} minute(s)",
                 job.Id,
                 HostOf(job.Url),
-                config.RateLimitBackoffMinutes);
+                backoff.TotalMinutes);
 
             if (!requeued)
             {
