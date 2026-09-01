@@ -403,6 +403,13 @@ public class FfmpegArgumentTests
     [InlineData("Stream ends prematurely at 12345, should be 23456")]
     [InlineData("[https @ 0x55] HTTP error 404 Not Found")]
     [InlineData("Server returned 500 Internal Server Error")]
+    // A three-digit run on its own is not a status code: ffmpeg puts segment numbers and whole
+    // URLs in its errors, and treating either as a refusal parks every job on the host.
+    [InlineData("[hls @ 0x55] Failed to open segment 1403 of playlist 0")]
+    [InlineData("Opening 'https://cdn.example.com/seg_4290.ts' for reading")]
+    [InlineData("[hls @ 0x55] keepalive request failed for 'https://x/403/a.ts'")]
+    // "Forbidden" counts only next to a 403.
+    [InlineData("Forbidden characters in the output file name")]
     [InlineData("")]
     public void IsRateLimited_LeavesOrdinaryFailuresToTheNormalRetry(string line)
     {

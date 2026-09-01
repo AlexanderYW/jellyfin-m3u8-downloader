@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.M3u8Downloader.Configuration;
@@ -18,7 +19,7 @@ namespace Jellyfin.Plugin.M3u8Downloader.Services;
 /// <summary>
 /// Remuxes an HLS stream to a Matroska file using the server's bundled ffmpeg.
 /// </summary>
-public sealed class FfmpegDownloader : IFfmpegDownloader
+public sealed partial class FfmpegDownloader : IFfmpegDownloader
 {
     /// <summary>How many stderr lines to keep for the failure message.</summary>
     private const int StderrTailLines = 50;
@@ -939,13 +940,7 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
                 continue;
             }
 
-            // 429 is unambiguous. 403 is included because hosts overwhelmingly answer a tripped
-            // rate limit with it rather than 429, and a genuinely forbidden URL is not something
-            // retrying sooner would have fixed either.
-            if (line.Contains("429", StringComparison.Ordinal)
-                || line.Contains("Too Many Requests", StringComparison.OrdinalIgnoreCase)
-                || line.Contains("403", StringComparison.Ordinal)
-                || line.Contains("Forbidden", StringComparison.OrdinalIgnoreCase))
+            if (RateLimitPattern().IsMatch(line))
             {
                 return true;
             }
@@ -953,6 +948,26 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
 
         return false;
     }
+
+    /// <summary>
+    /// Matches the ways ffmpeg names a host refusing us.
+    /// </summary>
+    /// <returns>The compiled pattern.</returns>
+    /// <remarks>
+    /// The status code must appear in an HTTP context -- "HTTP error 403", "Server returned 429",
+    /// or the code immediately followed by its reason phrase. A bare three-digit run is
+    /// deliberately not enough: ffmpeg puts segment numbers and URLs in its errors, so
+    /// "Failed to open segment 1403 of playlist 0" and "Opening 'https://cdn/seg_4290.ts'" both
+    /// contain one, and treating either as a refusal would park every job on the host for the whole
+    /// backoff over an ordinary segment error.
+    ///
+    /// "Too Many Requests" stands alone because the phrase has no other meaning. "Forbidden" does
+    /// not: it has to be adjacent to a 403 to count.
+    /// </remarks>
+    [GeneratedRegex(
+        @"(?:HTTP\s+error|Server\s+returned(?:\s+code)?)\s+(?:403|429)\b|\b403\s+Forbidden\b|Too\s+Many\s+Requests",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex RateLimitPattern();
 
     /// <summary>
     /// Decides whether a failure was the audio bitstream filter choking on a damaged frame.
