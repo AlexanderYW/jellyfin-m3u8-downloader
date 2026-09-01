@@ -29,6 +29,9 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         // resolving the same output name must not both find it free.
         serviceCollection.AddSingleton<OutputFilePublisher>();
 
+        serviceCollection.AddSingleton<SourceProbe>();
+        serviceCollection.AddSingleton<ISourceProbe>(sp => sp.GetRequiredService<SourceProbe>());
+
         serviceCollection.AddSingleton<FfmpegDownloader>();
         serviceCollection.AddSingleton<IFfmpegDownloader>(sp => sp.GetRequiredService<FfmpegDownloader>());
 
