@@ -150,7 +150,8 @@ public sealed class QueueWorker : BackgroundService
 
                 _loggedPaused = false;
 
-                if (running.Count < limit && _queue.TryDequeueNext(limit) is { } job)
+                if (running.Count < limit
+                    && _queue.TryDequeueNext(limit, Math.Max(1, config.MaxConcurrentPerHost)) is { } job)
                 {
                     // Started without awaiting: that is what makes the downloads concurrent. Every
                     // outcome is turned into queue state inside ProcessJobAsync, which is why the
@@ -242,7 +243,7 @@ public sealed class QueueWorker : BackgroundService
         {
             foreach (var path in Directory.EnumerateFiles(
                 config.OutputDirectory,
-                "*" + OutputPathResolver.Extension + FfmpegDownloader.PartExtension,
+                "*" + OutputPathResolver.Extension + OutputFilePublisher.PartExtension,
                 SearchOption.AllDirectories))
             {
                 try
@@ -322,6 +323,43 @@ public sealed class QueueWorker : BackgroundService
             _queue.MarkAttemptFailed(job.Id, ArgumentErrorText.Describe(ex), 0, TimeSpan.Zero);
             _logger.LogError(ex, "M3u8 download {JobId} cannot be run as configured; not retrying", job.Id);
         }
+        catch (RateLimitedException ex)
+        {
+            // The host is refusing us, not failing on this particular stream. Retrying in the
+            // usual few seconds would re-request the whole thing from the first segment -- a remux
+            // has no resume point -- while the host is still angry, which is how a soft throttle
+            // turns into a lasting block. Back the whole host off instead, so the other episodes
+            // queued behind this one wait too.
+            // Escalated by attempt and jittered: a host that refuses us three times running should
+            // not be probed on the same schedule that already failed twice, and the cooldown is
+            // per host, so without the spread every job queued behind this one becomes runnable at
+            // the same instant and arrives as the very burst that tripped the limiter.
+            var backoff = RetryBackoff.ForRateLimit(
+                TimeSpan.FromMinutes(Math.Max(0, config.RateLimitBackoffMinutes)),
+                job.Attempts + 1,
+                RetryBackoff.DefaultJitterFraction,
+                Random.Shared);
+
+            _queue.CoolDownHost(job.Url, backoff);
+
+            var requeued = _queue.MarkAttemptFailed(
+                job.Id,
+                ex.Message,
+                Math.Max(0, config.MaxRetries),
+                backoff);
+
+            _logger.LogWarning(
+                ex,
+                "M3u8 download {JobId} was rate-limited by {Host}; pausing downloads from that host for {Minutes:F1} minute(s)",
+                job.Id,
+                HostOf(job.Url),
+                backoff.TotalMinutes);
+
+            if (!requeued)
+            {
+                _logger.LogError("M3u8 download {JobId} failed permanently after being rate-limited", job.Id);
+            }
+        }
         catch (Exception ex)
         {
             // One bad URL must never take the worker down for the rest of the server's lifetime.
@@ -343,8 +381,22 @@ public sealed class QueueWorker : BackgroundService
         finally
         {
             _queue.ClearActiveCancellation(job.Id);
+
+            // A courtesy gap so a queue of episodes from one site does not arrive as one unbroken
+            // stream of requests. Extends rather than replaces any cooldown already set above, so
+            // this cannot shorten a rate-limit backoff. The loop's bounded idle wait re-checks
+            // often enough that the expiry needs no signal of its own.
+            _queue.CoolDownHost(job.Url, TimeSpan.FromSeconds(Math.Max(0, config.DelayBetweenDownloadsSeconds)));
         }
     }
+
+    /// <summary>
+    /// Names the host a URL points at, for the log.
+    /// </summary>
+    /// <param name="url">The job URL.</param>
+    /// <returns>The hostname, or the raw string when it will not parse.</returns>
+    private static string HostOf(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host : url;
 
     /// <summary>
     /// Tells Jellyfin a new file appeared, so it shows up without a manual scan.

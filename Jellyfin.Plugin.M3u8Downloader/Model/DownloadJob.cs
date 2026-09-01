@@ -56,6 +56,35 @@ public class DownloadJob
     public double? DurationSeconds { get; set; }
 
     /// <summary>
+    /// Gets or sets the HLS program ffprobe picked out as carrying the best video, if any.
+    /// </summary>
+    /// <remarks>
+    /// Part of the cached probe result; see <see cref="ProbedUtc"/>.
+    /// </remarks>
+    public int? ProbedProgramId { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether the probed source turned out to be HLS.
+    /// </summary>
+    /// <remarks>
+    /// Part of the cached probe result; see <see cref="ProbedUtc"/>.
+    /// </remarks>
+    public bool? ProbedIsHls { get; set; }
+
+    /// <summary>
+    /// Gets or sets when ffprobe last described this source successfully.
+    /// </summary>
+    /// <remarks>
+    /// Its presence is what marks the probe fields as usable, and it is what lets an automatic
+    /// retry skip the probe entirely. That matters most after a rate limit: the probe would
+    /// otherwise be the first request back to a host still refusing us, and if it failed, stream
+    /// selection would fall back to the no-map path for a source we had already described
+    /// correctly. Cleared by an explicit user retry, which may well be a response to the source
+    /// having changed.
+    /// </remarks>
+    public DateTime? ProbedUtc { get; set; }
+
+    /// <summary>
     /// Gets or sets how far into the media ffmpeg has written, in seconds.
     /// </summary>
     public double PositionSeconds { get; set; }

@@ -3,9 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using System.Linq;
-using System.Text;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.M3u8Downloader.Configuration;
@@ -23,30 +20,6 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
     /// <summary>How many stderr lines to keep for the failure message.</summary>
     private const int StderrTailLines = 50;
 
-    /// <summary>How many times publishing may re-resolve around a name that appeared mid-download.</summary>
-    private const int PublishAttempts = 5;
-
-    /// <summary>Suffix of the in-progress file, before it is published under its real name.</summary>
-    /// <remarks>
-    /// Public because the worker sweeps abandoned ones at startup; see
-    /// <see cref="ReserveOutputPath"/> for why the file is the reservation itself.
-    /// </remarks>
-    public const string PartExtension = ".part";
-
-    /// <summary>
-    /// Serialises output-path selection across concurrent downloads.
-    /// </summary>
-    /// <remarks>
-    /// Resolving a name and reserving it must be one step. Two downloads of the same name would
-    /// otherwise both find the path free -- deduplication only consults the filesystem -- and race
-    /// to publish it at the end. Held only for the resolve and the reservation, never across the
-    /// download itself.
-    /// </remarks>
-    private static readonly object _reservationLock = new();
-
-    /// <summary>Cap on how long ffprobe may spend measuring the duration.</summary>
-    private static readonly TimeSpan _probeTimeout = TimeSpan.FromSeconds(60);
-
     /// <summary>
     /// How often the download is checked for having stalled.
     /// </summary>
@@ -58,6 +31,8 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
 
     private readonly IMediaEncoder _mediaEncoder;
     private readonly IDownloadQueueService _queue;
+    private readonly ISourceProbe _probe;
+    private readonly OutputFilePublisher _publisher;
     private readonly ILogger<FfmpegDownloader> _logger;
 
     /// <summary>
@@ -65,14 +40,20 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
     /// </summary>
     /// <param name="mediaEncoder">Supplies the ffmpeg and ffprobe paths the server already uses.</param>
     /// <param name="queue">Receives live progress updates.</param>
+    /// <param name="probe">Describes the source before it is downloaded.</param>
+    /// <param name="publisher">Reserves the output name and publishes the finished file.</param>
     /// <param name="logger">The logger.</param>
     public FfmpegDownloader(
         IMediaEncoder mediaEncoder,
         IDownloadQueueService queue,
+        ISourceProbe probe,
+        OutputFilePublisher publisher,
         ILogger<FfmpegDownloader> logger)
     {
         _mediaEncoder = mediaEncoder;
         _queue = queue;
+        _probe = probe;
+        _publisher = publisher;
         _logger = logger;
     }
 
@@ -101,13 +82,27 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
                 "The server has not reported an ffmpeg path yet. Check the ffmpeg configuration in Dashboard > Playback.");
         }
 
-        var (finalPath, tempPath) = ReserveOutputPath(config, job.RequestedFileName);
+        var (finalPath, tempPath) = _publisher.ReserveOutputPath(config.OutputDirectory, job.RequestedFileName);
 
         try
         {
             // Inside the try because the reservation already exists: a cancelled or failed probe
             // must not leave an empty .part file behind holding a name nothing is writing to.
-            var source = await ProbeSourceAsync(job.Url, config, cancellationToken).ConfigureAwait(false);
+            var source = CachedProbe(job);
+
+            if (source is null)
+            {
+                source = await _probe.ProbeSourceAsync(job.Url, config, cancellationToken).ConfigureAwait(false);
+
+                if (source.ProbeSucceeded)
+                {
+                    // Kept for any automatic retry of this job. A remux has no resume point, so a
+                    // retry re-requests the whole stream; not spending an extra probe request on
+                    // top of that matters most when the retry follows a rate limit.
+                    _queue.RecordProbe(job.Id, source.DurationSeconds, source.BestProgramId, source.IsHls);
+                }
+            }
+
             _queue.ReportProgress(job.Id, 0, source.DurationSeconds);
 
             await RunFfmpegAsync(job, config, tempPath, source, cancellationToken).ConfigureAwait(false);
@@ -117,442 +112,13 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
             // Only the probe and the download can leave a file that is genuinely partial. Once
             // ffmpeg has exited zero the .part holds a complete download, so publishing is
             // deliberately outside this catch -- see the remarks.
-            TryDelete(tempPath);
+            _publisher.TryDelete(tempPath);
             throw;
         }
 
         // Only publish the finished name once ffmpeg has succeeded, so a partial file is never
         // picked up by a library scan.
-        return PublishFinishedFile(config, job.RequestedFileName, tempPath, finalPath);
-    }
-
-    /// <summary>
-    /// Picks the output path and claims it before anything is downloaded.
-    /// </summary>
-    /// <param name="config">Current plugin settings.</param>
-    /// <param name="requestedFileName">The name the job asked for.</param>
-    /// <returns>The final path and the temporary path now reserved for it.</returns>
-    /// <remarks>
-    /// The empty <c>.part</c> file is the reservation itself, and it is created immediately rather
-    /// than left to ffmpeg: the probe runs first and may take a minute, which is ample time for a
-    /// second download of the same name to pick the same path. Passing a predicate that also sees
-    /// <c>.part</c> files is what makes an in-flight download visible to the next one.
-    /// </remarks>
-    private static (string FinalPath, string TempPath) ReserveOutputPath(PluginConfiguration config, string requestedFileName)
-    {
-        lock (_reservationLock)
-        {
-            var finalPath = OutputPathResolver.Resolve(
-                config.OutputDirectory,
-                requestedFileName,
-                path => File.Exists(path) || File.Exists(path + PartExtension));
-
-            Directory.CreateDirectory(Path.GetDirectoryName(finalPath)!);
-
-            var tempPath = finalPath + PartExtension;
-
-            // ffmpeg is invoked with -y, so the empty placeholder is simply overwritten.
-            File.Create(tempPath).Dispose();
-
-            return (finalPath, tempPath);
-        }
-    }
-
-    /// <summary>
-    /// Moves a finished download onto its final name, working around a name taken since it started.
-    /// </summary>
-    /// <param name="config">Current plugin settings.</param>
-    /// <param name="requestedFileName">The name the job asked for.</param>
-    /// <param name="tempPath">The completed <c>.part</c> file.</param>
-    /// <param name="finalPath">The name reserved when the download began.</param>
-    /// <returns>Where the file actually landed.</returns>
-    private string PublishFinishedFile(PluginConfiguration config, string requestedFileName, string tempPath, string finalPath)
-    {
-        string destination;
-
-        // Held across the move as well as the resolve: picking a replacement name and taking it are
-        // one step here, exactly as they are when the name is first reserved.
-        try
-        {
-            lock (_reservationLock)
-            {
-                destination = Publish(
-                    config.OutputDirectory,
-                    requestedFileName,
-                    tempPath,
-                    finalPath,
-                    File.Exists,
-                    (from, to) => File.Move(from, to, overwrite: false));
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // The download itself succeeded, so say plainly where the finished bytes are: the job
-            // will retry and re-download, but this file can simply be renamed instead.
-            _logger.LogError(
-                ex,
-                "The download finished but could not be published to {Destination}. The complete file is at {TempPath}; rename it by hand to keep it, or it will be swept on the next server restart",
-                finalPath,
-                tempPath);
-            throw;
-        }
-
-        if (!string.Equals(destination, finalPath, StringComparison.Ordinal))
-        {
-            _logger.LogWarning(
-                "{Reserved} was taken while the download was running; published to {Destination} instead",
-                finalPath,
-                destination);
-        }
-
-        return destination;
-    }
-
-    /// <summary>
-    /// Builds the ffmpeg argument list for a download.
-    /// </summary>
-    /// <param name="url">The source URL.</param>
-    /// <param name="outputPath">The temporary output path.</param>
-    /// <param name="config">Current plugin settings.</param>
-    /// <param name="bestProgramId">
-    /// The HLS program carrying the highest-resolution video, when the source exposes more than
-    /// one. Drives stream selection; see the remarks.
-    /// </param>
-    /// <param name="isHls">
-    /// Whether ffmpeg will use its HLS demuxer for this input. HLS-only options must not be sent
-    /// otherwise: ffmpeg fails the input outright with "Option not found".
-    /// </param>
-    /// <param name="hasKnownDuration">
-    /// Whether the probe found a duration. Gates the length cap; see the remarks on
-    /// <see cref="PluginConfiguration.MaxDurationMinutes"/>.
-    /// </param>
-    /// <returns>Arguments in order, each already a separate argv entry.</returns>
-    /// <remarks>
-    /// Pure and static so the argument construction can be asserted in tests without spawning a
-    /// process. Arguments are kept as a list rather than a joined string precisely so that a URL
-    /// or filename containing quotes or spaces cannot alter the command shape.
-    /// </remarks>
-    public static IReadOnlyList<string> BuildDownloadArguments(
-        string url,
-        string outputPath,
-        PluginConfiguration config,
-        int? bestProgramId = null,
-        bool isHls = false,
-        bool hasKnownDuration = false)
-    {
-        ArgumentNullException.ThrowIfNull(config);
-
-        var args = new List<string>
-        {
-            "-hide_banner",
-
-            // Without this ffmpeg competes with the server for stdin.
-            "-nostdin",
-            "-loglevel", "error",
-
-            // Machine-readable progress on stdout, leaving stderr purely for diagnostics.
-            "-progress", "pipe:1",
-        };
-
-        AppendRequestHeaders(args, config);
-
-        // Network robustness. All of these are *input* options and are silently useless after -i,
-        // which is why ExtraInputArgs exists separately from ExtraFfmpegArgs.
-        //
-        // Every one of these defaults to off in ffmpeg, so out of the box a single dropped TLS
-        // connection mid-segment ends the whole download. These are http/https protocol options
-        // and are safe for any remote input (the queue only accepts http and https URLs).
-        args.Add("-reconnect");
-        args.Add("1");
-        args.Add("-reconnect_streamed");
-        args.Add("1");
-        args.Add("-reconnect_on_network_error");
-        args.Add("1");
-        args.Add("-reconnect_delay_max");
-        args.Add("30");
-
-        if (isHls)
-        {
-            // HLS-demuxer options. Gated on isHls because ffmpeg rejects the whole input with
-            // "Option not found" when the demuxer does not define them.
-
-            // Defaults to 0: without this, one truncated segment aborts the entire download
-            // rather than being re-fetched.
-            args.Add("-seg_max_retry");
-            args.Add("5");
-
-            if (!config.ReuseHttpConnections)
-            {
-                // Defaults to on. CDNs that rotate the hostname per segment then produce
-                // "Cannot reuse HTTP connection for different host", truncated segments, and a
-                // failed mux. Reconnecting per segment costs a handshake and avoids the class
-                // of failure entirely.
-                args.Add("-http_persistent");
-                args.Add("0");
-            }
-        }
-
-        args.AddRange(SplitArguments(config.ExtraInputArgs));
-
-        args.Add("-i");
-        args.Add(url);
-
-        // Stream selection. The goal is every real audio track and subtitle language, but only one
-        // copy of the video.
-        //
-        // An HLS master playlist exposes each bitrate rendition as its own video stream while
-        // sharing the audio and subtitle tracks, and groups each rendition with those shared
-        // tracks into a "program". So mapping the program that holds the best video yields one
-        // video plus every audio track and every subtitle -- whereas "-map 0:v -map 0:a -map 0:s?"
-        // would copy the same video five times over on such a source.
-        //
-        // -dn is required here because a program also contains HLS timed-metadata (ID3) streams,
-        // which Matroska cannot store: without it, muxing fails outright with "Only audio, video,
-        // and subtitles are supported for Matroska".
-        if (bestProgramId is not null)
-        {
-            args.Add("-map");
-            args.Add(string.Create(CultureInfo.InvariantCulture, $"0:p:{bestProgramId.Value}"));
-            args.Add("-dn");
-        }
-        else
-        {
-            // No usable program structure (a plain media playlist, or a non-HLS input): take every
-            // video, audio and subtitle stream. Naming the types explicitly cannot select a data
-            // stream, so no -dn is needed. The trailing '?' keeps a missing type from being fatal.
-            args.Add("-map");
-            args.Add("0:v?");
-            args.Add("-map");
-            args.Add("0:a?");
-            args.Add("-map");
-            args.Add("0:s?");
-        }
-
-        // Remux without re-encoding: fast, lossless, and the whole point of choosing Matroska.
-        args.Add("-c");
-        args.Add("copy");
-
-        // A live stream has no duration and so no end: ffmpeg would keep recording until the disk
-        // fills. Placed before the user's own output args so an explicit -t there still wins.
-        //
-        // Applied only to sources whose length is unknown, because that is the case it exists for:
-        // capping a film the probe measured at three hours would silently truncate it and still
-        // report the job as completed. LimitLengthOnAllDownloads restores the blanket cap for
-        // anyone who wants one.
-        if (config.MaxDurationMinutes > 0 && (config.LimitLengthOnAllDownloads || !hasKnownDuration))
-        {
-            args.Add("-t");
-            args.Add(string.Create(CultureInfo.InvariantCulture, $"{config.MaxDurationMinutes * 60}"));
-        }
-
-        args.AddRange(SplitArguments(config.ExtraFfmpegArgs));
-
-        args.Add("-f");
-        args.Add("matroska");
-        args.Add("-y");
-        args.Add(outputPath);
-
-        return args;
-    }
-
-    /// <summary>
-    /// Builds the ffprobe argument list used to inspect a source before downloading it.
-    /// </summary>
-    /// <param name="url">The source URL.</param>
-    /// <param name="config">Current plugin settings.</param>
-    /// <returns>Arguments in order, each already a separate argv entry.</returns>
-    /// <remarks>
-    /// The probe sends the same request headers as the download. A host that gates on User-Agent or
-    /// Referer would otherwise reject the probe while accepting the download, and a failed probe is
-    /// not merely cosmetic: without a program to map, stream selection falls back to
-    /// <c>-map 0:v?</c>, which copies every bitrate rendition of a master playlist into the output.
-    ///
-    /// <see cref="PluginConfiguration.ExtraInputArgs"/> is deliberately not forwarded: it holds
-    /// ffmpeg input options, and one ffprobe does not define would fail the probe outright -- the
-    /// very outcome this method exists to avoid.
-    /// </remarks>
-    public static IReadOnlyList<string> BuildProbeArguments(string url, PluginConfiguration config)
-    {
-        ArgumentNullException.ThrowIfNull(config);
-
-        var args = new List<string>
-        {
-            "-v", "quiet",
-            "-print_format", "json",
-            "-show_format",
-            "-show_programs",
-        };
-
-        AppendRequestHeaders(args, config);
-
-        args.Add("-i");
-        args.Add(url);
-
-        return args;
-    }
-
-    /// <summary>
-    /// Moves a finished download onto its reserved name, resolving a fresh one if it was taken.
-    /// </summary>
-    /// <param name="outputRoot">The configured output directory.</param>
-    /// <param name="requestedFileName">The name the job asked for.</param>
-    /// <param name="tempPath">The completed <c>.part</c> file to move.</param>
-    /// <param name="finalPath">The name reserved when the download began.</param>
-    /// <param name="fileExists">Existence predicate; production passes <see cref="File.Exists(string)"/>.</param>
-    /// <param name="move">Performs the move, failing if the destination exists.</param>
-    /// <returns>Where the file actually landed.</returns>
-    /// <remarks>
-    /// The <c>.part</c> reservation makes a collision with another job impossible, but nothing stops
-    /// a person or another program from creating the file during what may be a multi-hour download.
-    /// Failing there would delete the finished download and start it over, so a fresh name is
-    /// resolved and the move retried -- exactly what deduplication would have done had the file
-    /// existed when the job started.
-    ///
-    /// The filesystem is injected for the same reason it is in <see cref="OutputPathResolver"/>: the
-    /// interesting behaviour is the retry, and it should be assertable without a real disk.
-    ///
-    /// An <see cref="IOException"/> that is not a collision -- and one that outlives
-    /// <see cref="PublishAttempts"/> tries -- propagates. The caller leaves the finished
-    /// <c>.part</c> in place rather than discarding it.
-    /// </remarks>
-    public static string Publish(
-        string outputRoot,
-        string requestedFileName,
-        string tempPath,
-        string finalPath,
-        Func<string, bool> fileExists,
-        Action<string, string> move)
-    {
-        ArgumentNullException.ThrowIfNull(fileExists);
-        ArgumentNullException.ThrowIfNull(move);
-
-        var destination = finalPath;
-
-        for (var attempt = 1; ; attempt++)
-        {
-            try
-            {
-                move(tempPath, destination);
-                return destination;
-            }
-            catch (IOException) when (attempt < PublishAttempts && fileExists(destination))
-            {
-                destination = OutputPathResolver.Resolve(
-                    outputRoot,
-                    requestedFileName,
-                    // Our own .part is not a collision: it is the file being published.
-                    path => (!string.Equals(path + PartExtension, tempPath, StringComparison.Ordinal)
-                            && fileExists(path + PartExtension))
-                        || fileExists(path));
-            }
-        }
-    }
-
-    /// <summary>
-    /// Splits a user-entered argument string on whitespace, honouring double quotes.
-    /// </summary>
-    /// <param name="value">The raw setting value.</param>
-    /// <returns>Individual arguments.</returns>
-    public static IReadOnlyList<string> SplitArguments(string? value)
-    {
-        var result = new List<string>();
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return result;
-        }
-
-        var current = new StringBuilder();
-        var inQuotes = false;
-
-        foreach (var c in value)
-        {
-            if (c == '"')
-            {
-                inQuotes = !inQuotes;
-            }
-            else if (char.IsWhiteSpace(c) && !inQuotes)
-            {
-                if (current.Length > 0)
-                {
-                    result.Add(current.ToString());
-                    current.Clear();
-                }
-            }
-            else
-            {
-                current.Append(c);
-            }
-        }
-
-        if (current.Length > 0)
-        {
-            result.Add(current.ToString());
-        }
-
-        return result;
-    }
-
-    /// <summary>
-    /// Parses one <c>-progress</c> output line.
-    /// </summary>
-    /// <param name="line">A single <c>key=value</c> line from ffmpeg's progress stream.</param>
-    /// <returns>
-    /// What the line carried. ffmpeg writes one key per line, so a sample holds either a position
-    /// or a speed, never both; a line carrying neither yields an empty sample.
-    /// </returns>
-    public static ProgressSample ParseProgressLine(string? line)
-    {
-        var empty = new ProgressSample(null, null);
-
-        if (string.IsNullOrEmpty(line))
-        {
-            return empty;
-        }
-
-        var separator = line.IndexOf('=', StringComparison.Ordinal);
-        if (separator <= 0)
-        {
-            return empty;
-        }
-
-        var key = line.AsSpan(0, separator).Trim();
-        var rawValue = line.AsSpan(separator + 1).Trim();
-
-        // "N/A" shows up before the first frame is muxed.
-        if (rawValue.IsEmpty || rawValue.Equals("N/A", StringComparison.OrdinalIgnoreCase))
-        {
-            return empty;
-        }
-
-        if (key.Equals("out_time_us", StringComparison.Ordinal) || key.Equals("out_time_ms", StringComparison.Ordinal))
-        {
-            // Both keys are microseconds; out_time_ms is a long-standing ffmpeg misnomer.
-            return long.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var micros)
-                ? new ProgressSample(micros / 1_000_000d, null)
-                : empty;
-        }
-
-        if (key.Equals("out_time", StringComparison.Ordinal))
-        {
-            return TimeSpan.TryParse(rawValue, CultureInfo.InvariantCulture, out var ts)
-                ? new ProgressSample(ts.TotalSeconds, null)
-                : empty;
-        }
-
-        if (key.Equals("speed", StringComparison.Ordinal))
-        {
-            // Reported as "1.02x", occasionally padded ("  0.5x"). The trailing unit is always
-            // there, so strip it rather than trusting the parser to stop at it.
-            var number = rawValue.EndsWith("x", StringComparison.OrdinalIgnoreCase)
-                ? rawValue[..^1].Trim()
-                : rawValue;
-
-            return double.TryParse(number, NumberStyles.Float, CultureInfo.InvariantCulture, out var speed) && speed > 0
-                ? new ProgressSample(null, speed)
-                : empty;
-        }
-
-        return empty;
+        return _publisher.PublishFinishedFile(config.OutputDirectory, job.RequestedFileName, tempPath, finalPath);
     }
 
     /// <summary>
@@ -571,6 +137,56 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
         SourceInfo source,
         CancellationToken cancellationToken)
     {
+        var (error, audioBitstream) = await RunFfmpegAttemptAsync(
+            job, config, tempPath, source, reencodeAudio: false, cancellationToken).ConfigureAwait(false);
+
+        if (audioBitstream)
+        {
+            // Retrying the copy verbatim would fail at the same frame, so the one retry that has
+            // any chance is a different command. See IsAudioBitstreamFailure for why this is the
+            // only failure worth spending an extra full download on: everything else either
+            // succeeds on a plain retry or would not have been fixed by re-encoding either.
+            _logger.LogWarning(
+                "Download {JobId} failed while copying its audio into Matroska; retrying once with the audio re-encoded.",
+                job.Id);
+
+            (error, _) = await RunFfmpegAttemptAsync(
+                job, config, tempPath, source, reencodeAudio: true, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (error is not null)
+        {
+            throw error;
+        }
+    }
+
+    /// <summary>
+    /// Runs ffmpeg once and reports how it ended.
+    /// </summary>
+    /// <param name="job">The job being downloaded.</param>
+    /// <param name="config">Current plugin settings.</param>
+    /// <param name="tempPath">The reserved <c>.part</c> path ffmpeg writes to.</param>
+    /// <param name="source">What the probe found.</param>
+    /// <param name="reencodeAudio">Whether this is the re-encoding fallback attempt.</param>
+    /// <param name="cancellationToken">Cancels the download.</param>
+    /// <returns>
+    /// The failure to raise, or <c>null</c> on success, together with whether that failure was the
+    /// audio bitstream filter. Returned rather than thrown so the caller can decide to try again;
+    /// a cancellation or a stall still throws, because neither is retryable here.
+    /// </returns>
+    /// <remarks>
+    /// Each attempt is a fresh ffmpeg writing the same <c>.part</c> from the start -- the argument
+    /// list ends in <c>-y</c>, so the abandoned partial output is overwritten rather than appended
+    /// to.
+    /// </remarks>
+    private async Task<(Exception? Error, bool AudioBitstream)> RunFfmpegAttemptAsync(
+        DownloadJob job,
+        PluginConfiguration config,
+        string tempPath,
+        SourceInfo source,
+        bool reencodeAudio,
+        CancellationToken cancellationToken)
+    {
         var startInfo = new ProcessStartInfo
         {
             FileName = _mediaEncoder.EncoderPath,
@@ -581,16 +197,20 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
             CreateNoWindow = true,
         };
 
-        foreach (var arg in BuildDownloadArguments(
+        foreach (var arg in FfmpegArguments.BuildDownloadArguments(
             job.Url,
             tempPath,
             config,
             source.BestProgramId,
             source.IsHls,
-            source.DurationSeconds is > 0))
+            source.DurationSeconds is > 0,
+            source.ProbeSucceeded,
+            reencodeAudio))
         {
             startInfo.ArgumentList.Add(arg);
         }
+
+        ApplyProxy(startInfo, config);
 
         _logger.LogInformation("Starting m3u8 download {JobId} to {Path}", job.Id, tempPath);
         _logger.LogDebug("ffmpeg {Path} {Args}", startInfo.FileName, string.Join(' ', startInfo.ArgumentList));
@@ -636,16 +256,30 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
             throw new InvalidOperationException(
                 string.Create(
                     CultureInfo.InvariantCulture,
-                    $"ffmpeg made no progress for {config.StallTimeoutMinutes} minute(s) and was stopped: {Describe(stderrTail)}"));
+                    $"ffmpeg made no progress for {config.StallTimeoutMinutes} minute(s) and was stopped: {FfmpegOutputClassifier.Describe(stderrTail)}"));
         }
 
         await WaitQuietlyAsync(stdoutTask, stderrTask).ConfigureAwait(false);
 
-        if (process.ExitCode != 0)
+        if (process.ExitCode == 0)
         {
-            throw new InvalidOperationException(
-                string.Create(CultureInfo.InvariantCulture, $"ffmpeg exited with code {process.ExitCode}: {Describe(stderrTail)}"));
+            return (null, false);
         }
+
+        var message = string.Create(
+            CultureInfo.InvariantCulture,
+            $"ffmpeg exited with code {process.ExitCode}: {FfmpegOutputClassifier.Describe(stderrTail)}");
+
+        // Same message either way; the type is what tells the worker to back off across the
+        // whole host instead of retrying this job in a few seconds.
+        Exception error = FfmpegOutputClassifier.IsRateLimited(stderrTail)
+            ? new RateLimitedException(message)
+            : new InvalidOperationException(message);
+
+        // A rate limit outranks the bitstream check: re-encoding cannot help a host that is
+        // refusing us, and the second attempt would only spend more of the budget it is angry
+        // about. The fallback is also pointless on the attempt that already used it.
+        return (error, !reencodeAudio && error is not RateLimitedException && FfmpegOutputClassifier.IsAudioBitstreamFailure(stderrTail));
     }
 
     /// <summary>
@@ -697,15 +331,6 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
     }
 
     /// <summary>
-    /// Renders the retained stderr tail for a failure message.
-    /// </summary>
-    /// <param name="stderrTail">The recent stderr lines.</param>
-    /// <returns>The diagnostic text.</returns>
-    private static string Describe(Queue<string> stderrTail) => stderrTail.Count > 0
-        ? string.Join(Environment.NewLine, stderrTail)
-        : "no diagnostic output";
-
-    /// <summary>
     /// Reads ffmpeg's progress stream and pushes positions into the queue.
     /// </summary>
     /// <param name="reader">ffmpeg's stdout.</param>
@@ -719,7 +344,7 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
 
         while (await reader.ReadLineAsync().ConfigureAwait(false) is { } line)
         {
-            var sample = ParseProgressLine(line);
+            var sample = FfmpegOutputClassifier.ParseProgressLine(line);
             if (!sample.HasValue)
             {
                 continue;
@@ -762,223 +387,45 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
     }
 
     /// <summary>
-    /// Asks ffprobe what it can about the source before the download starts.
+    /// Returns what an earlier attempt learned about this job's source, if anything.
     /// </summary>
-    /// <param name="url">The source URL.</param>
-    /// <param name="config">Current plugin settings.</param>
-    /// <param name="cancellationToken">Cancels the probe.</param>
-    /// <returns>
-    /// The duration and best program, either of which may be <c>null</c>. A failed probe is never
-    /// fatal: without a duration the progress readout falls back to elapsed time, and without a
-    /// program the download falls back to explicit per-type stream mapping.
-    /// </returns>
-    private async Task<SourceInfo> ProbeSourceAsync(string url, PluginConfiguration config, CancellationToken cancellationToken)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = _mediaEncoder.ProbePath,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-
-        foreach (var arg in BuildProbeArguments(url, config))
-        {
-            startInfo.ArgumentList.Add(arg);
-        }
-
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutCts.CancelAfter(_probeTimeout);
-
-        try
-        {
-            using var process = new Process { StartInfo = startInfo };
-            if (!process.Start())
-            {
-                return new SourceInfo(null, null, LooksLikeHlsUrl(url));
-            }
-
-            var readTask = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
-
-            // Drained even though "-v quiet" should keep it empty: an unread pipe that does fill up
-            // blocks ffprobe until the timeout, turning a fast probe into a 60-second stall.
-            var drainErrorTask = process.StandardError.ReadToEndAsync(CancellationToken.None);
-
-            try
-            {
-                await process.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                TryKill(process);
-                throw;
-            }
-
-            var json = await readTask.ConfigureAwait(false);
-            await drainErrorTask.ConfigureAwait(false);
-            if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(json))
-            {
-                return new SourceInfo(null, null, LooksLikeHlsUrl(url));
-            }
-
-            using var document = JsonDocument.Parse(json);
-            return new SourceInfo(
-                ReadDuration(document.RootElement),
-                ReadBestProgramId(document.RootElement),
-                ReadIsHls(document.RootElement) || LooksLikeHlsUrl(url));
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            // The user cancelled the job; let the caller handle it.
-            throw;
-        }
-        catch (Exception ex) when (ex is OperationCanceledException or JsonException or InvalidOperationException or IOException)
-        {
-            _logger.LogDebug(ex, "Could not probe {Url}", url);
-        }
-
-        return new SourceInfo(null, null, LooksLikeHlsUrl(url));
-    }
-
-    /// <summary>
-    /// Appends the configured HTTP request headers as ffmpeg/ffprobe input options.
-    /// </summary>
-    /// <param name="args">The argument list being built.</param>
-    /// <param name="config">Current plugin settings.</param>
-    private static void AppendRequestHeaders(List<string> args, PluginConfiguration config)
-    {
-        if (!string.IsNullOrWhiteSpace(config.UserAgent))
-        {
-            args.Add("-user_agent");
-            args.Add(config.UserAgent);
-        }
-
-        if (!string.IsNullOrWhiteSpace(config.Referer))
-        {
-            args.Add("-headers");
-            args.Add("Referer: " + config.Referer + "\r\n");
-        }
-    }
-
-    /// <summary>
-    /// Determines whether ffprobe demuxed the input as HLS.
-    /// </summary>
-    /// <param name="root">The ffprobe JSON root.</param>
-    /// <returns><c>true</c> when the HLS demuxer handled the input.</returns>
-    private static bool ReadIsHls(JsonElement root)
-    {
-        if (!root.TryGetProperty("format", out var format)
-            || !format.TryGetProperty("format_name", out var nameElement))
-        {
-            return false;
-        }
-
-        // format_name is a comma-separated list of candidate demuxers, e.g. "hls" or
-        // "hls,applehttp" depending on the build.
-        var name = nameElement.GetString();
-        return name is not null
-            && name.Split(',').Any(n => n.Trim().Equals("hls", StringComparison.OrdinalIgnoreCase)
-                || n.Trim().Equals("applehttp", StringComparison.OrdinalIgnoreCase));
-    }
-
-    /// <summary>
-    /// Falls back to the URL when the probe could not identify the demuxer.
-    /// </summary>
-    /// <param name="url">The source URL.</param>
-    /// <returns><c>true</c> when the URL path names a playlist.</returns>
+    /// <param name="job">The job being run.</param>
+    /// <returns>The cached probe result, or <c>null</c> when the source has not been described yet.</returns>
     /// <remarks>
-    /// A probe can fail on a source that still downloads fine (a host that rejects ffprobe's
-    /// request but not ffmpeg's, for instance). Losing the HLS tuning options in that case would
-    /// mean losing exactly the robustness that a flaky host calls for.
+    /// Only a successful probe is ever recorded, so a cached result always stands for one --
+    /// which is what lets it be handed back with <see cref="SourceInfo.ProbeSucceeded"/> set.
     /// </remarks>
-    private static bool LooksLikeHlsUrl(string url)
-    {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
-        {
-            return false;
-        }
-
-        return uri.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)
-            || uri.AbsolutePath.EndsWith(".m3u", StringComparison.OrdinalIgnoreCase);
-    }
+    private static SourceInfo? CachedProbe(DownloadJob job) =>
+        job.ProbedUtc is null
+            ? null
+            : new SourceInfo(job.DurationSeconds, job.ProbedProgramId, job.ProbedIsHls ?? false, ProbeSucceeded: true);
 
     /// <summary>
-    /// Reads the total duration out of an ffprobe document.
+    /// Points a child process at the configured proxy, reporting a value that cannot be used.
     /// </summary>
-    /// <param name="root">The ffprobe JSON root.</param>
-    /// <returns>The duration in seconds, or <c>null</c> when absent (e.g. a live stream).</returns>
-    private static double? ReadDuration(JsonElement root)
+    /// <param name="startInfo">The child process about to be started.</param>
+    /// <param name="config">Current plugin settings.</param>
+    /// <remarks>
+    /// Reading <see cref="ProcessStartInfo.Environment"/> seeds it from this process, so the child
+    /// still inherits everything the server was started with; only the proxy variables are added.
+    ///
+    /// A proxy that cannot be parsed is reported and skipped rather than thrown: a typo in a
+    /// settings field should not turn every queued download into a failure, and a silent fallback
+    /// to a direct connection is exactly the surprise a proxy user does not want.
+    /// </remarks>
+    private void ApplyProxy(ProcessStartInfo startInfo, PluginConfiguration config)
     {
-        if (root.TryGetProperty("format", out var format)
-            && format.TryGetProperty("duration", out var durationElement)
-            && double.TryParse(durationElement.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
-            && seconds > 0)
+        var proxy = ProxySettings.ApplyProxyEnvironment(startInfo.Environment, config);
+
+        if (proxy is not null)
         {
-            return seconds;
+            _logger.LogDebug("Routing through HTTP proxy {Proxy}", proxy);
         }
-
-        return null;
-    }
-
-    /// <summary>
-    /// Finds the program carrying the highest-resolution video.
-    /// </summary>
-    /// <param name="root">The ffprobe JSON root.</param>
-    /// <returns>
-    /// The program id to map, or <c>null</c> when the source has fewer than two programs — with a
-    /// single program there is nothing to choose between, and plain per-type mapping is simpler
-    /// and less likely to surprise.
-    /// </returns>
-    private static int? ReadBestProgramId(JsonElement root)
-    {
-        if (!root.TryGetProperty("programs", out var programs) || programs.ValueKind != JsonValueKind.Array)
+        else if (!string.IsNullOrWhiteSpace(config.ProxyUrl))
         {
-            return null;
+            _logger.LogWarning(
+                "Ignoring the configured proxy: it must be an absolute http:// URL, and ffmpeg does not support SOCKS proxies.");
         }
-
-        if (programs.GetArrayLength() < 2)
-        {
-            return null;
-        }
-
-        int? bestId = null;
-        long bestPixels = -1;
-
-        foreach (var program in programs.EnumerateArray())
-        {
-            if (!program.TryGetProperty("program_id", out var idElement) || !idElement.TryGetInt32(out var id))
-            {
-                continue;
-            }
-
-            if (!program.TryGetProperty("streams", out var streams) || streams.ValueKind != JsonValueKind.Array)
-            {
-                continue;
-            }
-
-            foreach (var stream in streams.EnumerateArray())
-            {
-                if (!stream.TryGetProperty("codec_type", out var type)
-                    || !string.Equals(type.GetString(), "video", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                var pixels = stream.TryGetProperty("width", out var w) && w.TryGetInt32(out var width)
-                    && stream.TryGetProperty("height", out var h) && h.TryGetInt32(out var height)
-                        ? (long)width * height
-                        : 0;
-
-                if (pixels > bestPixels)
-                {
-                    bestPixels = pixels;
-                    bestId = id;
-                }
-            }
-        }
-
-        return bestId;
     }
 
     /// <summary>
@@ -1015,25 +462,6 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
         catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or SystemException)
         {
             _logger.LogDebug(ex, "Could not kill the ffmpeg process; it likely already exited");
-        }
-    }
-
-    /// <summary>
-    /// Deletes a partial file, ignoring failures.
-    /// </summary>
-    /// <param name="path">The file to remove.</param>
-    private void TryDelete(string path)
-    {
-        try
-        {
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            _logger.LogWarning(ex, "Could not remove the partial download at {Path}", path);
         }
     }
 }

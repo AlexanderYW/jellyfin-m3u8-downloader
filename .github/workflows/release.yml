@@ -90,6 +90,7 @@ jobs:
           echo "source_url=${{ github.server_url }}/${{ github.repository }}/releases/download/$tag/$zip_name" >> "$GITHUB_OUTPUT"
 
       - name: Tag the release
+        id: tag
         if: steps.next.outputs.release == 'true'
         run: |
           set -euo pipefail
@@ -153,3 +154,15 @@ jobs:
           # [skip ci] is belt and braces: pushes made with GITHUB_TOKEN do not retrigger workflows.
           git commit -m "chore(release): publish ${{ steps.next.outputs.version4 }} to the plugin manifest [skip ci]"
           git push origin HEAD:"${{ github.event.repository.default_branch }}"
+
+      # A tag left behind by a half-finished release makes next_version.py report
+      # "no releasable commits" on every later run, wedging the pipeline until someone
+      # deletes it by hand. Undo the tag and the release so a re-run starts clean.
+      - name: Roll back a partial release
+        if: failure() && steps.tag.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.next.outputs.tag }}
+        run: |
+          gh release delete "$TAG" --yes || true
+          git push --delete origin "$TAG" || true

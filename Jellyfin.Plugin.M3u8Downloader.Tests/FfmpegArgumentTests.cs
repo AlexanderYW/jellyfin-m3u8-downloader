@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using Jellyfin.Plugin.M3u8Downloader.Configuration;
 using Jellyfin.Plugin.M3u8Downloader.Services;
@@ -13,13 +12,10 @@ public class FfmpegArgumentTests
     private const string Url = "https://example.com/a.m3u8";
     private const string Output = "/media/out.mkv.part";
 
-    /// <summary>An absolute root, so the resolver's containment check has something to work with.</summary>
-    private static readonly string Root = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "m3u8-publish-tests"));
-
     [Fact]
     public void BuildDownloadArguments_NoProgram_MapsEveryVideoAudioAndSubtitleStream()
     {
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, new PluginConfiguration());
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, new PluginConfiguration());
 
         Assert.Equal(
             new[]
@@ -27,6 +23,8 @@ public class FfmpegArgumentTests
                 "-hide_banner", "-nostdin", "-loglevel", "error", "-progress", "pipe:1",
                 "-reconnect", "1", "-reconnect_streamed", "1",
                 "-reconnect_on_network_error", "1", "-reconnect_delay_max", "30",
+                "-readrate", "10",
+                "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
                 "-i", Url,
                 "-map", "0:v?", "-map", "0:a?", "-map", "0:s?",
                 "-c", "copy",
@@ -38,7 +36,7 @@ public class FfmpegArgumentTests
     [Fact]
     public void BuildDownloadArguments_WithProgram_MapsThatProgramAndDropsDataStreams()
     {
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, new PluginConfiguration(), bestProgramId: 4);
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, new PluginConfiguration(), bestProgramId: 4);
 
         Assert.Equal(
             new[]
@@ -46,6 +44,8 @@ public class FfmpegArgumentTests
                 "-hide_banner", "-nostdin", "-loglevel", "error", "-progress", "pipe:1",
                 "-reconnect", "1", "-reconnect_streamed", "1",
                 "-reconnect_on_network_error", "1", "-reconnect_delay_max", "30",
+                "-readrate", "10",
+                "-err_detect", "ignore_err", "-fflags", "+discardcorrupt",
                 "-i", Url,
                 "-map", "0:p:4", "-dn",
                 "-c", "copy",
@@ -60,7 +60,7 @@ public class FfmpegArgumentTests
         // Mapping the program is what preserves every audio track and subtitle language; naming
         // types individually here would re-introduce the duplicate-video problem on a master
         // playlist. Guard against someone "simplifying" this back to per-type mapping.
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, new PluginConfiguration(), bestProgramId: 0);
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, new PluginConfiguration(), bestProgramId: 0);
 
         Assert.Contains("0:p:0", args);
         Assert.DoesNotContain("0:v?", args);
@@ -70,7 +70,7 @@ public class FfmpegArgumentTests
     [Fact]
     public void BuildDownloadArguments_NoProgram_OmitsDnBecauseTypedMapsCannotSelectDataStreams()
     {
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, new PluginConfiguration());
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, new PluginConfiguration());
 
         Assert.DoesNotContain("-dn", args);
     }
@@ -78,7 +78,7 @@ public class FfmpegArgumentTests
     [Fact]
     public void BuildDownloadArguments_OmitsHeaderFlagsWhenUnset()
     {
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, new PluginConfiguration());
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, new PluginConfiguration());
 
         Assert.DoesNotContain("-user_agent", args);
         Assert.DoesNotContain("-headers", args);
@@ -93,7 +93,7 @@ public class FfmpegArgumentTests
             Referer = "https://example.com/",
         };
 
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config).ToList();
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, config).ToList();
 
         Assert.Equal("Mozilla/5.0", args[args.IndexOf("-user_agent") + 1]);
         Assert.Equal("Referer: https://example.com/\r\n", args[args.IndexOf("-headers") + 1]);
@@ -110,7 +110,7 @@ public class FfmpegArgumentTests
     {
         var config = new PluginConfiguration { ExtraFfmpegArgs = "-bsf:a aac_adtstoasc" };
 
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config, programId).ToList();
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, config, programId).ToList();
 
         Assert.True(args.IndexOf("aac_adtstoasc") < args.IndexOf(Output));
         Assert.Equal(Output, args[^1]);
@@ -122,7 +122,7 @@ public class FfmpegArgumentTests
         // Quotes and spaces in a URL must not be able to change the shape of the command.
         var hostile = "https://example.com/a b.m3u8?x=\"y\" -y /etc/passwd";
 
-        var args = FfmpegDownloader.BuildDownloadArguments(hostile, Output, new PluginConfiguration()).ToList();
+        var args = FfmpegArguments.BuildDownloadArguments(hostile, Output, new PluginConfiguration()).ToList();
 
         Assert.Equal(hostile, args[args.IndexOf("-i") + 1]);
         Assert.Single(args, a => a == hostile);
@@ -137,7 +137,7 @@ public class FfmpegArgumentTests
     [InlineData("-metadata \"title=Some Show\"", new[] { "-metadata", "title=Some Show" })]
     public void SplitArguments_HonoursQuotes(string? input, string[] expected)
     {
-        Assert.Equal(expected, FfmpegDownloader.SplitArguments(input));
+        Assert.Equal(expected, FfmpegArguments.SplitArguments(input));
     }
 
     [Theory]
@@ -146,7 +146,7 @@ public class FfmpegArgumentTests
     [InlineData("out_time=00:00:30.5", 30.5d)]
     public void ParseProgressLine_ReadsPosition(string line, double expected)
     {
-        var sample = FfmpegDownloader.ParseProgressLine(line);
+        var sample = FfmpegOutputClassifier.ParseProgressLine(line);
 
         Assert.Equal(expected, sample.PositionSeconds);
         Assert.Null(sample.SpeedRatio);
@@ -158,7 +158,7 @@ public class FfmpegArgumentTests
     [InlineData("speed=0.5x", 0.5d)]
     public void ParseProgressLine_ReadsSpeed(string line, double expected)
     {
-        var sample = FfmpegDownloader.ParseProgressLine(line);
+        var sample = FfmpegOutputClassifier.ParseProgressLine(line);
 
         Assert.Equal(expected, sample.SpeedRatio);
         Assert.Null(sample.PositionSeconds);
@@ -176,7 +176,7 @@ public class FfmpegArgumentTests
     [InlineData("=5")]
     public void ParseProgressLine_IgnoresEverythingElse(string? line)
     {
-        Assert.False(FfmpegDownloader.ParseProgressLine(line).HasValue);
+        Assert.False(FfmpegOutputClassifier.ParseProgressLine(line).HasValue);
     }
 
     [Fact]
@@ -184,7 +184,7 @@ public class FfmpegArgumentTests
     {
         // Every reconnect option defaults to off in ffmpeg, so without these a single dropped
         // connection mid-segment ends the download.
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, new PluginConfiguration()).ToList();
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, new PluginConfiguration()).ToList();
 
         foreach (var flag in new[] { "-reconnect", "-reconnect_streamed", "-reconnect_on_network_error" })
         {
@@ -194,34 +194,62 @@ public class FfmpegArgumentTests
     }
 
     [Fact]
+    public void BuildDownloadArguments_DiscardsCorruptPacketsByDefault()
+    {
+        // A truncated segment leaves a partial frame that the Matroska muxer rejects outright,
+        // killing the download; these two make the demuxer drop it instead.
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, new PluginConfiguration()).ToList();
+
+        Assert.Equal("ignore_err", args[args.IndexOf("-err_detect") + 1]);
+        Assert.Equal("+discardcorrupt", args[args.IndexOf("-fflags") + 1]);
+        Assert.True(args.IndexOf("-err_detect") < args.IndexOf("-i"), "-err_detect must be an input option");
+        Assert.True(args.IndexOf("-fflags") < args.IndexOf("-i"), "-fflags must be an input option");
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_KeepsCorruptPacketsWhenToleranceIsOff()
+    {
+        var config = new PluginConfiguration { TolerateCorruptSegments = false };
+
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, config);
+
+        Assert.DoesNotContain("-err_detect", args);
+        Assert.DoesNotContain("-fflags", args);
+    }
+
+    [Fact]
     public void BuildDownloadArguments_NonHls_OmitsHlsOnlyOptions()
     {
         // ffmpeg fails the input with "Option not found" when these reach a non-HLS demuxer.
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, new PluginConfiguration(), isHls: false);
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, new PluginConfiguration(), isHls: false);
 
         Assert.DoesNotContain("-seg_max_retry", args);
         Assert.DoesNotContain("-http_persistent", args);
     }
 
     [Fact]
-    public void BuildDownloadArguments_Hls_RetriesSegmentsAndDisablesConnectionReuse()
+    public void BuildDownloadArguments_Hls_RetriesSegmentsAndReusesConnectionsByDefault()
     {
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, new PluginConfiguration(), isHls: true).ToList();
+        // Keep-alive is the default because the alternative is a fresh TCP+TLS handshake per
+        // segment -- around 1200 new connections for a two-hour stream, which is precisely what a
+        // host's connection-rate limiter counts.
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, new PluginConfiguration(), isHls: true).ToList();
 
         Assert.Equal("5", args[args.IndexOf("-seg_max_retry") + 1]);
-        Assert.Equal("0", args[args.IndexOf("-http_persistent") + 1]);
         Assert.True(args.IndexOf("-seg_max_retry") < args.IndexOf("-i"));
-        Assert.True(args.IndexOf("-http_persistent") < args.IndexOf("-i"));
+        Assert.DoesNotContain("-http_persistent", args);
     }
 
     [Fact]
-    public void BuildDownloadArguments_Hls_KeepsConnectionReuseWhenEnabled()
+    public void BuildDownloadArguments_Hls_DisablesConnectionReuseWhenTurnedOff()
     {
-        var config = new PluginConfiguration { ReuseHttpConnections = true };
+        // The opt-out, for CDNs that rotate the hostname between segments.
+        var config = new PluginConfiguration { ReuseHttpConnections = false };
 
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config, isHls: true);
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, config, isHls: true).ToList();
 
-        Assert.DoesNotContain("-http_persistent", args);
+        Assert.Equal("0", args[args.IndexOf("-http_persistent") + 1]);
+        Assert.True(args.IndexOf("-http_persistent") < args.IndexOf("-i"));
         Assert.Contains("-seg_max_retry", args);
     }
 
@@ -230,7 +258,7 @@ public class FfmpegArgumentTests
     {
         var config = new PluginConfiguration { ExtraInputArgs = "-rw_timeout 15000000" };
 
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config).ToList();
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, config).ToList();
 
         Assert.True(args.IndexOf("-rw_timeout") < args.IndexOf("-i"));
         Assert.Equal("15000000", args[args.IndexOf("-rw_timeout") + 1]);
@@ -245,10 +273,159 @@ public class FfmpegArgumentTests
             ExtraFfmpegArgs = "-OUTPUTMARK 1",
         };
 
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config).ToList();
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, config).ToList();
 
         Assert.True(args.IndexOf("-INPUTMARK") < args.IndexOf("-i"));
         Assert.True(args.IndexOf("-OUTPUTMARK") > args.IndexOf("-i"));
+    }
+
+    // ---------------------------------------------------------------- rendition fan-out
+
+    [Fact]
+    public void BuildDownloadArguments_FailedProbeOnHls_MapsNothingSoOnlyOneRenditionIsFetched()
+    {
+        // The whole point of this case. On a master playlist every bitrate rendition is its own
+        // video stream, so "-map 0:v?" selects all of them and the HLS demuxer fetches four to six
+        // variant playlists simultaneously from one host -- which reads as a scraper and gets the
+        // server's IP blocked. Mapping nothing leaves ffmpeg's default selection to take a single
+        // video, and only that variant is ever requested.
+        var args = FfmpegArguments.BuildDownloadArguments(
+            Url,
+            Output,
+            new PluginConfiguration(),
+            bestProgramId: null,
+            isHls: true,
+            probeSucceeded: false);
+
+        Assert.DoesNotContain("-map", args);
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_SuccessfulProbeWithNoProgram_StillMapsEveryStreamType()
+    {
+        // A probe that succeeded and found fewer than two programs genuinely has no renditions to
+        // fan out across, so the per-type mapping is safe here and keeps every audio track.
+        var args = FfmpegArguments.BuildDownloadArguments(
+            Url,
+            Output,
+            new PluginConfiguration(),
+            bestProgramId: null,
+            isHls: true,
+            probeSucceeded: true).ToList();
+
+        Assert.Contains("0:v?", args);
+        Assert.Contains("0:a?", args);
+        Assert.Contains("0:s?", args);
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_FailedProbeOnNonHls_StillMapsEveryStreamType()
+    {
+        // A non-HLS input has no renditions, so a failed probe there costs nothing and the extra
+        // audio tracks are worth keeping.
+        var args = FfmpegArguments.BuildDownloadArguments(
+            Url,
+            Output,
+            new PluginConfiguration(),
+            bestProgramId: null,
+            isHls: false,
+            probeSucceeded: false).ToList();
+
+        Assert.Contains("0:v?", args);
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_KnownProgram_IgnoresTheProbeFlag()
+    {
+        // A program id can only have come from a successful probe, but the program map must win
+        // regardless -- it is strictly better than either fallback.
+        var args = FfmpegArguments.BuildDownloadArguments(
+            Url,
+            Output,
+            new PluginConfiguration(),
+            bestProgramId: 4,
+            isHls: true,
+            probeSucceeded: false).ToList();
+
+        Assert.Contains("0:p:4", args);
+        Assert.DoesNotContain("0:v?", args);
+    }
+
+    // ---------------------------------------------------------------- speed limit
+
+    [Fact]
+    public void BuildDownloadArguments_PacesTheDownloadByDefault()
+    {
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, new PluginConfiguration()).ToList();
+
+        Assert.Equal("10", args[args.IndexOf("-readrate") + 1]);
+        Assert.True(args.IndexOf("-readrate") < args.IndexOf("-i"), "-readrate must be an input option");
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_OmitsTheSpeedLimitWhenZero()
+    {
+        // 0 is the escape hatch for an ffmpeg older than 5.1, which rejects the option outright.
+        var config = new PluginConfiguration { MaxSpeedMultiplier = 0 };
+
+        Assert.DoesNotContain("-readrate", FfmpegArguments.BuildDownloadArguments(Url, Output, config));
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_FormatsAFractionalSpeedLimitInvariantly()
+    {
+        // A locale that writes "2,5" would have ffmpeg reject the whole input.
+        var config = new PluginConfiguration { MaxSpeedMultiplier = 2.5 };
+
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, config).ToList();
+
+        Assert.Equal("2.5", args[args.IndexOf("-readrate") + 1]);
+    }
+
+    // ---------------------------------------------------------------- request headers
+
+    [Fact]
+    public void BuildDownloadArguments_StripsNewlinesFromTheReferer()
+    {
+        // The -headers value is a CRLF-separated block, so a break inside one entry does not stay
+        // inside it. A Referer pasted from a browser's network panel routinely carries one.
+        var config = new PluginConfiguration { Referer = "https://example.com/watch\r\n" };
+
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, config).ToList();
+
+        Assert.Equal("Referer: https://example.com/watch\r\n", args[args.IndexOf("-headers") + 1]);
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_RefererCannotSmuggleAFurtherHeader()
+    {
+        var config = new PluginConfiguration { Referer = "https://example.com\r\nX-Injected: 1" };
+
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, config).ToList();
+
+        var value = args[args.IndexOf("-headers") + 1];
+        Assert.Equal("Referer: https://example.comX-Injected: 1\r\n", value);
+        Assert.Single(args, a => a == "-headers");
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_StripsNewlinesFromTheUserAgent()
+    {
+        var config = new PluginConfiguration { UserAgent = "Mozilla/5.0\n" };
+
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, config).ToList();
+
+        Assert.Equal("Mozilla/5.0", args[args.IndexOf("-user_agent") + 1]);
+    }
+
+    [Fact]
+    public void BuildDownloadArguments_ARefererOfOnlyWhitespaceIsNotSent()
+    {
+        var config = new PluginConfiguration { Referer = "\r\n  " };
+
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, config).ToList();
+
+        Assert.DoesNotContain("-headers", args);
     }
 
     // ---------------------------------------------------------------- probe arguments
@@ -256,7 +433,7 @@ public class FfmpegArgumentTests
     [Fact]
     public void BuildProbeArguments_AsksForTheFormatAndProgramsAsJson()
     {
-        var args = FfmpegDownloader.BuildProbeArguments(Url, new PluginConfiguration());
+        var args = FfmpegArguments.BuildProbeArguments(Url, new PluginConfiguration());
 
         Assert.Equal(
             new[]
@@ -279,7 +456,7 @@ public class FfmpegArgumentTests
             Referer = "https://example.com/",
         };
 
-        var args = FfmpegDownloader.BuildProbeArguments(Url, config);
+        var args = FfmpegArguments.BuildProbeArguments(Url, config);
 
         Assert.Equal(
             new[]
@@ -299,127 +476,7 @@ public class FfmpegArgumentTests
         // outcome sharing the headers exists to avoid.
         var config = new PluginConfiguration { ExtraInputArgs = "-rw_timeout 5000000" };
 
-        Assert.DoesNotContain("-rw_timeout", FfmpegDownloader.BuildProbeArguments(Url, config));
-    }
-
-    // ---------------------------------------------------------------- publishing
-
-    [Fact]
-    public void Publish_FreeName_MovesStraightOntoIt()
-    {
-        var moves = new List<(string From, string To)>();
-
-        var landed = FfmpegDownloader.Publish(
-            Root,
-            "Show",
-            Path.Combine(Root, "Show.mkv.part"),
-            Path.Combine(Root, "Show.mkv"),
-            _ => false,
-            (from, to) => moves.Add((from, to)));
-
-        Assert.Equal(Path.Combine(Root, "Show.mkv"), landed);
-        Assert.Single(moves);
-    }
-
-    [Fact]
-    public void Publish_NameTakenDuringTheDownload_ResolvesAFreshOneInsteadOfFailing()
-    {
-        // Nothing stops a person creating the file during a multi-hour download. Failing here would
-        // throw the finished download away and start it over.
-        var taken = Path.Combine(Root, "Show.mkv");
-        var tempPath = Path.Combine(Root, "Show.mkv.part");
-        var existing = new HashSet<string>(StringComparer.Ordinal) { taken };
-
-        var landed = FfmpegDownloader.Publish(
-            Root,
-            "Show",
-            tempPath,
-            taken,
-            existing.Contains,
-            (_, to) =>
-            {
-                if (existing.Contains(to))
-                {
-                    throw new IOException("destination exists");
-                }
-            });
-
-        Assert.Equal(Path.Combine(Root, "Show (2).mkv"), landed);
-    }
-
-    [Fact]
-    public void Publish_NonCollisionIoError_PropagatesWithoutRetrying()
-    {
-        // The retry exists for a name that was taken mid-download. Anything else -- a permissions
-        // change, a directory sitting where the file should go -- is not going to be fixed by
-        // picking a different name, and the caller must see it so the finished .part is kept.
-        var attempts = 0;
-
-        Assert.Throws<IOException>(() => FfmpegDownloader.Publish(
-            Root,
-            "Show",
-            Path.Combine(Root, "Show.mkv.part"),
-            Path.Combine(Root, "Show.mkv"),
-            _ => false,
-            (_, _) =>
-            {
-                attempts++;
-                throw new IOException("permission denied");
-            }));
-
-        Assert.Equal(1, attempts);
-    }
-
-    [Fact]
-    public void Publish_CollisionThatNeverClears_GivesUpRatherThanLooping()
-    {
-        // Bounded so a destination that is taken the instant it is resolved cannot spin forever.
-        // The caller leaves the finished .part alone on the way out.
-        var tempPath = Path.Combine(Root, "Show.mkv.part");
-        var taken = new HashSet<string>(StringComparer.Ordinal) { Path.Combine(Root, "Show.mkv") };
-        var attempts = 0;
-
-        Assert.Throws<IOException>(() => FfmpegDownloader.Publish(
-            Root,
-            "Show",
-            tempPath,
-            Path.Combine(Root, "Show.mkv"),
-            taken.Contains,
-            (_, to) =>
-            {
-                attempts++;
-
-                // Something claims each freshly resolved name before the move lands on it.
-                taken.Add(to);
-                throw new IOException("destination exists");
-            }));
-
-        Assert.Equal(5, attempts);
-    }
-
-    [Fact]
-    public void Publish_DoesNotTreatItsOwnPartFileAsACollision()
-    {
-        // The .part being published is on disk by definition; counting it as taken would push every
-        // publish one name along.
-        var tempPath = Path.Combine(Root, "Show.mkv.part");
-        var existing = new HashSet<string>(StringComparer.Ordinal) { Path.Combine(Root, "Show.mkv"), tempPath };
-
-        var landed = FfmpegDownloader.Publish(
-            Root,
-            "Show",
-            tempPath,
-            Path.Combine(Root, "Show.mkv"),
-            existing.Contains,
-            (_, to) =>
-            {
-                if (existing.Contains(to))
-                {
-                    throw new IOException("destination exists");
-                }
-            });
-
-        Assert.Equal(Path.Combine(Root, "Show (2).mkv"), landed);
+        Assert.DoesNotContain("-rw_timeout", FfmpegArguments.BuildProbeArguments(Url, config));
     }
 
     // ---------------------------------------------------------------- duration cap
@@ -427,7 +484,7 @@ public class FfmpegArgumentTests
     [Fact]
     public void BuildDownloadArguments_NoDurationCapByDefault()
     {
-        Assert.DoesNotContain("-t", FfmpegDownloader.BuildDownloadArguments(Url, Output, new PluginConfiguration()));
+        Assert.DoesNotContain("-t", FfmpegArguments.BuildDownloadArguments(Url, Output, new PluginConfiguration()));
     }
 
     [Fact]
@@ -435,7 +492,7 @@ public class FfmpegArgumentTests
     {
         var config = new PluginConfiguration { MaxDurationMinutes = 90 };
 
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config);
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, config);
 
         var index = args.ToList().IndexOf("-t");
         Assert.True(index >= 0);
@@ -449,7 +506,7 @@ public class FfmpegArgumentTests
         // would truncate it silently and still report the job as completed.
         var config = new PluginConfiguration { MaxDurationMinutes = 60 };
 
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config, hasKnownDuration: true);
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, config, hasKnownDuration: true);
 
         Assert.DoesNotContain("-t", args);
     }
@@ -459,7 +516,7 @@ public class FfmpegArgumentTests
     {
         var config = new PluginConfiguration { MaxDurationMinutes = 60, LimitLengthOnAllDownloads = true };
 
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config, hasKnownDuration: true).ToList();
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, config, hasKnownDuration: true).ToList();
 
         Assert.Equal("3600", args[args.IndexOf("-t") + 1]);
     }
@@ -473,7 +530,7 @@ public class FfmpegArgumentTests
             ExtraFfmpegArgs = "-t 60",
         };
 
-        var args = FfmpegDownloader.BuildDownloadArguments(Url, Output, config).ToList();
+        var args = FfmpegArguments.BuildDownloadArguments(Url, Output, config).ToList();
 
         // After -i, so it applies to the output; before the user's own args, so theirs wins.
         Assert.InRange(args.IndexOf("-t"), args.IndexOf("-i"), args.Count);

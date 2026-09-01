@@ -383,6 +383,47 @@
                     </div>
 
                     <div class="inputContainer">
+                        <input is="emby-input" type="number" id="MaxConcurrentPerHost" label="Simultaneous downloads per site" min="1" max="8" step="1" />
+                        <div class="fieldDescription">
+                            Applied on top of the limit above. Downloads spread across several sites are
+                            ordinary; several aimed at one site is what gets your IP blocked. At
+                            <code>1</code>, the queue skips past a site that is already busy and starts the
+                            next download from a different one.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="MaxSpeedMultiplier" label="Speed limit (&times; realtime)" min="0" max="1000" step="0.5" />
+                        <div class="fieldDescription">
+                            Caps how fast a stream is fetched. Uncapped, a two-hour stream arrives in a couple
+                            of minutes as one dense burst of requests &mdash; the traffic shape rate limiters
+                            are built to catch. At <code>10</code> the same stream takes about twelve minutes.
+                            Lower it to <code>2</code> or <code>3</code> for a site that has already blocked
+                            you. <code>0</code> means no limit; use that if your ffmpeg is older than 5.1 and
+                            reports <code>Option not found</code>.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="DelayBetweenDownloadsSeconds" label="Pause between downloads (seconds)" min="0" max="3600" step="1" />
+                        <div class="fieldDescription">
+                            How long to wait before starting another download from the same site, so a queue
+                            of episodes does not arrive as one unbroken stream of requests. Downloads from
+                            other sites start immediately.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <input is="emby-input" type="number" id="RateLimitBackoffMinutes" label="Pause after being rate-limited (minutes)" min="0" max="1440" step="1" />
+                        <div class="fieldDescription">
+                            When a site answers with <code>429</code> or <code>403</code>, every queued
+                            download from that site waits this long. A download cannot resume part-way, so
+                            retrying sooner re-requests the whole stream while the site is still refusing
+                            you &mdash; which is how a temporary throttle becomes a lasting block.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
                         <input is="emby-input" type="number" id="MaxDurationMinutes" label="Maximum length (minutes)" min="0" max="10080" step="1" />
                         <div class="fieldDescription">
                             Stops a download once it has recorded this much. Applies only to streams
@@ -445,6 +486,25 @@
                             </div>
 
                             <div class="inputContainer">
+                                <input is="emby-input" type="text" id="ProxyUrl" label="HTTP proxy (optional)" />
+                                <div class="fieldDescription">
+                                    Routes downloads through a proxy, e.g. <code>http://10.0.0.5:8080</code>
+                                    or <code>http://user:pass@10.0.0.5:8080</code>. Applies only to this
+                                    plugin's downloads, not to the rest of Jellyfin. Must use
+                                    <code>http://</code> even for https streams &mdash; ffmpeg does not
+                                    support SOCKS proxies. Leave blank to connect directly.
+                                </div>
+                            </div>
+
+                            <div class="inputContainer">
+                                <input is="emby-input" type="text" id="ProxyBypassList" label="Proxy bypass list (optional)" />
+                                <div class="fieldDescription">
+                                    Comma-separated hosts that skip the proxy, e.g.
+                                    <code>localhost,127.0.0.1,.lan</code>.
+                                </div>
+                            </div>
+
+                            <div class="inputContainer">
                                 <input is="emby-input" type="text" id="ExtraInputArgs" label="Extra ffmpeg input arguments (optional)" />
                                 <div class="fieldDescription">
                                     Placed before <code>-i</code>. Options such as <code>-reconnect</code> or
@@ -460,12 +520,26 @@
                             </div>
 
                             <label class="checkboxContainer">
+                                <input is="emby-checkbox" type="checkbox" id="TolerateCorruptSegments" />
+                                <span>Skip damaged packets instead of failing</span>
+                            </label>
+                            <div class="fieldDescription" style="margin-bottom:1em;">
+                                Leave on unless you would rather a damaged download failed. Some hosts serve
+                                short segments (<code>Stream ends prematurely</code>), and the partial frame at
+                                the end of one otherwise aborts the whole download with
+                                <code>Error muxing a packet</code>. Skipping them costs a brief glitch at each
+                                truncated segment.
+                            </div>
+
+                            <label class="checkboxContainer">
                                 <input is="emby-checkbox" type="checkbox" id="ReuseHttpConnections" />
                                 <span>Reuse HTTP connections between segments</span>
                             </label>
                             <div class="fieldDescription" style="margin-bottom:1em;">
-                                Leave off unless downloads are slow. Many CDNs rotate the hostname per segment,
-                                and reusing a connection across them causes
+                                Leave on. Without it every segment opens a new connection &mdash; around 1200 of
+                                them for a two-hour stream &mdash; and connection rate is one of the first things
+                                a site's rate limiter counts. Turn it off only for a CDN that rotates the
+                                hostname per segment, which causes
                                 <code>Cannot reuse HTTP connection for different host</code> and truncated downloads.
                             </div>
                         </div>
@@ -1059,6 +1133,17 @@
                     settings = config;
                     page.querySelector('#OutputDirectory').value = config.OutputDirectory || '';
                     page.querySelector('#MaxConcurrentDownloads').value = config.MaxConcurrentDownloads || 1;
+                    page.querySelector('#MaxConcurrentPerHost').value = config.MaxConcurrentPerHost || 1;
+
+                    // These three all treat 0 as a meaningful value ("no speed limit", "no pause"),
+                    // so `||` would quietly replace a deliberate 0 with the default on every load.
+                    page.querySelector('#MaxSpeedMultiplier').value =
+                        config.MaxSpeedMultiplier != null ? config.MaxSpeedMultiplier : 10;
+                    page.querySelector('#DelayBetweenDownloadsSeconds').value =
+                        config.DelayBetweenDownloadsSeconds != null ? config.DelayBetweenDownloadsSeconds : 5;
+                    page.querySelector('#RateLimitBackoffMinutes').value =
+                        config.RateLimitBackoffMinutes != null ? config.RateLimitBackoffMinutes : 30;
+
                     page.querySelector('#MaxDurationMinutes').value = config.MaxDurationMinutes || 0;
                     page.querySelector('#HistoryRetentionDays').value = config.HistoryRetentionDays || 0;
                     page.querySelector('#MaxRetries').value = config.MaxRetries;
@@ -1066,9 +1151,12 @@
                     page.querySelector('#StallTimeoutMinutes').value = config.StallTimeoutMinutes || 0;
                     page.querySelector('#UserAgent').value = config.UserAgent || '';
                     page.querySelector('#Referer').value = config.Referer || '';
+                    page.querySelector('#ProxyUrl').value = config.ProxyUrl || '';
+                    page.querySelector('#ProxyBypassList').value = config.ProxyBypassList || '';
                     page.querySelector('#ExtraInputArgs').value = config.ExtraInputArgs || '';
                     page.querySelector('#ExtraFfmpegArgs').value = config.ExtraFfmpegArgs || '';
-                    page.querySelector('#ReuseHttpConnections').checked = !!config.ReuseHttpConnections;
+                    page.querySelector('#TolerateCorruptSegments').checked = config.TolerateCorruptSegments !== false;
+                    page.querySelector('#ReuseHttpConnections').checked = config.ReuseHttpConnections !== false;
                     page.querySelector('#ScanLibraryAfterDownload').checked = !!config.ScanLibraryAfterDownload;
                     page.querySelector('#LimitLengthOnAllDownloads').checked = !!config.LimitLengthOnAllDownloads;
                     updateOutputDirWarning(config.OutputDirectory);
@@ -1082,6 +1170,14 @@
                     config.OutputDirectory = page.querySelector('#OutputDirectory').value.trim();
                     config.MaxConcurrentDownloads =
                         Math.min(8, Math.max(1, parseInt(page.querySelector('#MaxConcurrentDownloads').value, 10) || 1));
+                    config.MaxConcurrentPerHost =
+                        Math.min(8, Math.max(1, parseInt(page.querySelector('#MaxConcurrentPerHost').value, 10) || 1));
+                    config.MaxSpeedMultiplier =
+                        Math.max(0, parseFloat(page.querySelector('#MaxSpeedMultiplier').value) || 0);
+                    config.DelayBetweenDownloadsSeconds =
+                        Math.max(0, parseInt(page.querySelector('#DelayBetweenDownloadsSeconds').value, 10) || 0);
+                    config.RateLimitBackoffMinutes =
+                        Math.max(0, parseInt(page.querySelector('#RateLimitBackoffMinutes').value, 10) || 0);
                     config.MaxDurationMinutes =
                         Math.max(0, parseInt(page.querySelector('#MaxDurationMinutes').value, 10) || 0);
                     config.HistoryRetentionDays =
@@ -1092,8 +1188,11 @@
                         Math.max(0, parseInt(page.querySelector('#StallTimeoutMinutes').value, 10) || 0);
                     config.UserAgent = page.querySelector('#UserAgent').value.trim();
                     config.Referer = page.querySelector('#Referer').value.trim();
+                    config.ProxyUrl = page.querySelector('#ProxyUrl').value.trim();
+                    config.ProxyBypassList = page.querySelector('#ProxyBypassList').value.trim();
                     config.ExtraInputArgs = page.querySelector('#ExtraInputArgs').value.trim();
                     config.ExtraFfmpegArgs = page.querySelector('#ExtraFfmpegArgs').value.trim();
+                    config.TolerateCorruptSegments = page.querySelector('#TolerateCorruptSegments').checked;
                     config.ReuseHttpConnections = page.querySelector('#ReuseHttpConnections').checked;
                     config.ScanLibraryAfterDownload = page.querySelector('#ScanLibraryAfterDownload').checked;
                     config.LimitLengthOnAllDownloads = page.querySelector('#LimitLengthOnAllDownloads').checked;
