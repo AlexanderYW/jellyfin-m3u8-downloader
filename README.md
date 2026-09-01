@@ -264,7 +264,7 @@ Everything except the output directory has a working default.
 | Simultaneous downloads per site | 1 | Applied on top of the limit above. See *Avoiding an IP block*. |
 | Speed limit | 10× realtime | Paces the fetch instead of pulling a stream flat out. `0` is no limit. See *Avoiding an IP block*. |
 | Pause between downloads | 5s | Gap before starting another download from the same site. Other sites are unaffected. |
-| Pause after being rate-limited | 30 min | How long every download from a site waits after it answers `429` or `403`. |
+| Pause after being rate-limited | 30 min | How long every download from a site waits after it answers `429` or `403`. Doubles with each further refusal, up to 16×, and is spread by ±20% so the paused jobs do not all resume at the same instant. |
 | Maximum length | 0 (no limit) | Stops a download after this many minutes. Applies only to sources whose length ffmpeg cannot determine — the escape hatch for live streams, which never end on their own. |
 | Apply the maximum length to every download | off | Also caps sources of known length, truncating them. Off by default so a measured three-hour film is never silently cut short. |
 | Keep finished jobs for | 0 (forever) | Days of history to keep. Finished entries older than this are dropped from the list; files are never deleted. |
@@ -308,6 +308,14 @@ Drop it to `2` or `3` for a site that has already blocked you.
 from that site for 30 minutes, rather than retrying in 30 seconds. This matters because a download
 cannot resume part-way — the retry re-requests the whole stream from the first segment, while the
 site is still refusing you, which is how a temporary throttle becomes a lasting block.
+
+The pause doubles with each further refusal, so a site that keeps saying no is backed off further
+rather than probed on the schedule that already failed. It is also spread by ±20%: the pause applies
+per site, not per job, so without the spread every download queued behind the refused one would
+become runnable at the same instant and arrive together as exactly the burst that tripped the limiter.
+
+A retry no longer re-probes the source either. The probe is one more request, and after a rate limit
+it would be the first thing to touch a site that is still refusing you.
 
 If you are upgrading an existing installation, open the plugin settings and **tick "Reuse HTTP
 connections" by hand**. The new default only applies to fresh installs: your saved configuration
