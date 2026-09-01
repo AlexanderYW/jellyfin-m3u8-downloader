@@ -579,7 +579,7 @@ public class FfmpegArgumentTests
         var config = new PluginConfiguration { ProxyUrl = "http://10.0.0.5:8080" };
         var env = new Dictionary<string, string?>(StringComparer.Ordinal);
 
-        var applied = FfmpegDownloader.ApplyProxyEnvironment(env, config);
+        var applied = ProxySettings.ApplyProxyEnvironment(env, config);
 
         Assert.Equal("http://10.0.0.5:8080", applied);
         Assert.Equal("http://10.0.0.5:8080", env["http_proxy"]);
@@ -597,7 +597,7 @@ public class FfmpegArgumentTests
     {
         var env = new Dictionary<string, string?>(StringComparer.Ordinal);
 
-        Assert.Null(FfmpegDownloader.ApplyProxyEnvironment(env, new PluginConfiguration()));
+        Assert.Null(ProxySettings.ApplyProxyEnvironment(env, new PluginConfiguration()));
         Assert.Empty(env);
     }
 
@@ -613,7 +613,7 @@ public class FfmpegArgumentTests
         var config = new PluginConfiguration { ProxyUrl = proxy };
         var env = new Dictionary<string, string?>(StringComparer.Ordinal);
 
-        Assert.Null(FfmpegDownloader.ApplyProxyEnvironment(env, config));
+        Assert.Null(ProxySettings.ApplyProxyEnvironment(env, config));
         Assert.Empty(env);
     }
 
@@ -627,7 +627,7 @@ public class FfmpegArgumentTests
         };
         var env = new Dictionary<string, string?>(StringComparer.Ordinal);
 
-        FfmpegDownloader.ApplyProxyEnvironment(env, config);
+        ProxySettings.ApplyProxyEnvironment(env, config);
 
         Assert.Equal("localhost,127.0.0.1,.lan", env["no_proxy"]);
         Assert.Equal("localhost,127.0.0.1,.lan", env["NO_PROXY"]);
@@ -639,7 +639,7 @@ public class FfmpegArgumentTests
         var config = new PluginConfiguration { ProxyBypassList = "localhost" };
         var env = new Dictionary<string, string?>(StringComparer.Ordinal);
 
-        FfmpegDownloader.ApplyProxyEnvironment(env, config);
+        ProxySettings.ApplyProxyEnvironment(env, config);
 
         Assert.Empty(env);
     }
@@ -650,7 +650,7 @@ public class FfmpegArgumentTests
         var config = new PluginConfiguration { ProxyUrl = "  http://bob:hunter2@10.0.0.5:8080  " };
         var env = new Dictionary<string, string?>(StringComparer.Ordinal);
 
-        var applied = FfmpegDownloader.ApplyProxyEnvironment(env, config);
+        var applied = ProxySettings.ApplyProxyEnvironment(env, config);
 
         // ffmpeg needs the real credentials; the log line must not have them.
         Assert.Equal("http://bob:hunter2@10.0.0.5:8080", env["http_proxy"]);
