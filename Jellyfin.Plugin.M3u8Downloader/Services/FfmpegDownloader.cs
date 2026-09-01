@@ -108,7 +108,21 @@ public sealed partial class FfmpegDownloader : IFfmpegDownloader
         {
             // Inside the try because the reservation already exists: a cancelled or failed probe
             // must not leave an empty .part file behind holding a name nothing is writing to.
-            var source = await ProbeSourceAsync(job.Url, config, cancellationToken).ConfigureAwait(false);
+            var source = CachedProbe(job);
+
+            if (source is null)
+            {
+                source = await ProbeSourceAsync(job.Url, config, cancellationToken).ConfigureAwait(false);
+
+                if (source.ProbeSucceeded)
+                {
+                    // Kept for any automatic retry of this job. A remux has no resume point, so a
+                    // retry re-requests the whole stream; not spending an extra probe request on
+                    // top of that matters most when the retry follows a rate limit.
+                    _queue.RecordProbe(job.Id, source.DurationSeconds, source.BestProgramId, source.IsHls);
+                }
+            }
+
             _queue.ReportProgress(job.Id, 0, source.DurationSeconds);
 
             await RunFfmpegAsync(job, config, tempPath, source, cancellationToken).ConfigureAwait(false);
@@ -1071,6 +1085,20 @@ public sealed partial class FfmpegDownloader : IFfmpegDownloader
             _logger.LogDebug("ffmpeg: {Line}", line);
         }
     }
+
+    /// <summary>
+    /// Returns what an earlier attempt learned about this job's source, if anything.
+    /// </summary>
+    /// <param name="job">The job being run.</param>
+    /// <returns>The cached probe result, or <c>null</c> when the source has not been described yet.</returns>
+    /// <remarks>
+    /// Only a successful probe is ever recorded, so a cached result always stands for one --
+    /// which is what lets it be handed back with <see cref="SourceInfo.ProbeSucceeded"/> set.
+    /// </remarks>
+    private static SourceInfo? CachedProbe(DownloadJob job) =>
+        job.ProbedUtc is null
+            ? null
+            : new SourceInfo(job.DurationSeconds, job.ProbedProgramId, job.ProbedIsHls ?? false, ProbeSucceeded: true);
 
     /// <summary>
     /// Asks ffprobe what it can about the source before the download starts.

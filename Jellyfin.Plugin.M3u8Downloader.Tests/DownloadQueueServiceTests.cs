@@ -702,4 +702,75 @@ public sealed class DownloadQueueServiceTests : IDisposable
 
         await queue.WaitForWorkAsync(TimeSpan.FromMilliseconds(50), CancellationToken.None);
     }
+
+    [Fact]
+    public void RecordProbe_SurvivesAnAutomaticRetry()
+    {
+        // The point of caching it: a re-queued attempt must not have to ask the host again, least
+        // of all when the re-queue was itself caused by that host refusing us.
+        using var queue = NewQueue();
+        var job = Job("show");
+        queue.AddRange(new[] { job });
+        queue.TryDequeueNext(1);
+
+        queue.RecordProbe(job.Id, 1234, bestProgramId: 3, isHls: true);
+        queue.MarkAttemptFailed(job.Id, "boom", maxRetries: 2, TimeSpan.Zero);
+
+        var requeued = queue.GetAll().Single();
+        Assert.Equal(JobStatus.Queued, requeued.Status);
+        Assert.NotNull(requeued.ProbedUtc);
+        Assert.Equal(3, requeued.ProbedProgramId);
+        Assert.True(requeued.ProbedIsHls);
+        Assert.Equal(1234, requeued.DurationSeconds);
+    }
+
+    [Fact]
+    public void RecordProbe_SurvivesARestart()
+    {
+        var job = Job("show");
+
+        using (var queue = NewQueue())
+        {
+            queue.AddRange(new[] { job });
+            queue.RecordProbe(job.Id, 60, bestProgramId: 1, isHls: true);
+        }
+
+        using var restored = NewQueue();
+
+        var restoredJob = restored.GetAll().Single();
+        Assert.Equal(1, restoredJob.ProbedProgramId);
+        Assert.True(restoredJob.ProbedIsHls);
+        Assert.NotNull(restoredJob.ProbedUtc);
+    }
+
+    [Fact]
+    public void Retry_ClearsTheCachedProbe()
+    {
+        // A hand-driven retry is the one case worth re-probing for: whoever asked may be doing so
+        // because the source changed.
+        using var queue = NewQueue();
+        var job = Job("show");
+        queue.AddRange(new[] { job });
+        queue.TryDequeueNext(1);
+        queue.RecordProbe(job.Id, 1234, bestProgramId: 3, isHls: true);
+        queue.MarkAttemptFailed(job.Id, "boom", maxRetries: 0, TimeSpan.Zero);
+
+        Assert.True(queue.Retry(job.Id));
+
+        var retried = queue.GetAll().Single();
+        Assert.Null(retried.ProbedUtc);
+        Assert.Null(retried.ProbedProgramId);
+        Assert.Null(retried.ProbedIsHls);
+        Assert.Null(retried.DurationSeconds);
+    }
+
+    [Fact]
+    public void RecordProbe_ForAnUnknownJob_DoesNothing()
+    {
+        using var queue = NewQueue();
+
+        queue.RecordProbe(Guid.NewGuid(), 10, 1, true);
+
+        Assert.Empty(queue.GetAll());
+    }
 }

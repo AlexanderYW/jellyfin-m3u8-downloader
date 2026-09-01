@@ -50,6 +50,19 @@ public interface IDownloadQueueService
     void CoolDownHost(string url, TimeSpan duration);
 
     /// <summary>
+    /// Stores what ffprobe learned about a job's source, so a retry need not ask again.
+    /// </summary>
+    /// <param name="jobId">The job identifier.</param>
+    /// <param name="durationSeconds">The measured duration, if any.</param>
+    /// <param name="bestProgramId">The program carrying the best video, if the source has a choice.</param>
+    /// <param name="isHls">Whether the source is HLS.</param>
+    /// <remarks>
+    /// Persisted, unlike live progress: the point is precisely that it survives a re-queue, and a
+    /// probe is one request to a host that may already be refusing us.
+    /// </remarks>
+    void RecordProbe(Guid jobId, double? durationSeconds, int? bestProgramId, bool isHls);
+
+    /// <summary>
     /// Records live progress for a running job. Not persisted; flushed on the next transition.
     /// </summary>
     /// <param name="jobId">The job identifier.</param>

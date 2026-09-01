@@ -210,6 +210,31 @@ public sealed class DownloadQueueService : IDownloadQueueService, IDisposable
     }
 
     /// <inheritdoc />
+    public void RecordProbe(Guid jobId, double? durationSeconds, int? bestProgramId, bool isHls)
+    {
+        PendingSave? pending = null;
+
+        lock (_lock)
+        {
+            var job = Find(jobId);
+            if (job is not null)
+            {
+                if (durationSeconds is > 0)
+                {
+                    job.DurationSeconds = durationSeconds;
+                }
+
+                job.ProbedProgramId = bestProgramId;
+                job.ProbedIsHls = isHls;
+                job.ProbedUtc = DateTime.UtcNow;
+                pending = CaptureSave();
+            }
+        }
+
+        Flush(pending);
+    }
+
+    /// <inheritdoc />
     public void ReportProgress(Guid jobId, double positionSeconds, double? durationSeconds, double? speedRatio = null)
     {
         lock (_lock)
@@ -448,6 +473,14 @@ public sealed class DownloadQueueService : IDownloadQueueService, IDisposable
             job.CompletedUtc = null;
             job.PositionSeconds = 0;
             job.SpeedRatio = null;
+
+            // A hand-driven retry is the one case where re-probing is worth the request: someone
+            // asking for this again may well be doing so because the source itself changed.
+            // Automatic retries keep the cached probe.
+            job.ProbedProgramId = null;
+            job.ProbedIsHls = null;
+            job.ProbedUtc = null;
+            job.DurationSeconds = null;
             pending = CaptureSave();
         }
 
@@ -674,6 +707,9 @@ public sealed class DownloadQueueService : IDownloadQueueService, IDisposable
         ResolvedPath = job.ResolvedPath,
         Status = job.Status,
         DurationSeconds = job.DurationSeconds,
+        ProbedProgramId = job.ProbedProgramId,
+        ProbedIsHls = job.ProbedIsHls,
+        ProbedUtc = job.ProbedUtc,
         PositionSeconds = job.PositionSeconds,
         SpeedRatio = job.SpeedRatio,
         Attempts = job.Attempts,
