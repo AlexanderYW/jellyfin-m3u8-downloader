@@ -664,7 +664,7 @@ public class FfmpegArgumentTests
     {
         var moves = new List<(string From, string To)>();
 
-        var landed = FfmpegDownloader.Publish(
+        var landed = OutputFilePublisher.Publish(
             Root,
             "Show",
             Path.Combine(Root, "Show.mkv.part"),
@@ -685,7 +685,7 @@ public class FfmpegArgumentTests
         var tempPath = Path.Combine(Root, "Show.mkv.part");
         var existing = new HashSet<string>(StringComparer.Ordinal) { taken };
 
-        var landed = FfmpegDownloader.Publish(
+        var landed = OutputFilePublisher.Publish(
             Root,
             "Show",
             tempPath,
@@ -710,7 +710,7 @@ public class FfmpegArgumentTests
         // picking a different name, and the caller must see it so the finished .part is kept.
         var attempts = 0;
 
-        Assert.Throws<IOException>(() => FfmpegDownloader.Publish(
+        Assert.Throws<IOException>(() => OutputFilePublisher.Publish(
             Root,
             "Show",
             Path.Combine(Root, "Show.mkv.part"),
@@ -734,7 +734,7 @@ public class FfmpegArgumentTests
         var taken = new HashSet<string>(StringComparer.Ordinal) { Path.Combine(Root, "Show.mkv") };
         var attempts = 0;
 
-        Assert.Throws<IOException>(() => FfmpegDownloader.Publish(
+        Assert.Throws<IOException>(() => OutputFilePublisher.Publish(
             Root,
             "Show",
             tempPath,
@@ -760,7 +760,7 @@ public class FfmpegArgumentTests
         var tempPath = Path.Combine(Root, "Show.mkv.part");
         var existing = new HashSet<string>(StringComparer.Ordinal) { Path.Combine(Root, "Show.mkv"), tempPath };
 
-        var landed = FfmpegDownloader.Publish(
+        var landed = OutputFilePublisher.Publish(
             Root,
             "Show",
             tempPath,

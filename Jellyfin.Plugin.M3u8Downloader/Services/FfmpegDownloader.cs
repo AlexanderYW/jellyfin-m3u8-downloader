@@ -24,27 +24,6 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
     /// <summary>How many stderr lines to keep for the failure message.</summary>
     private const int StderrTailLines = 50;
 
-    /// <summary>How many times publishing may re-resolve around a name that appeared mid-download.</summary>
-    private const int PublishAttempts = 5;
-
-    /// <summary>Suffix of the in-progress file, before it is published under its real name.</summary>
-    /// <remarks>
-    /// Public because the worker sweeps abandoned ones at startup; see
-    /// <see cref="ReserveOutputPath"/> for why the file is the reservation itself.
-    /// </remarks>
-    public const string PartExtension = ".part";
-
-    /// <summary>
-    /// Serialises output-path selection across concurrent downloads.
-    /// </summary>
-    /// <remarks>
-    /// Resolving a name and reserving it must be one step. Two downloads of the same name would
-    /// otherwise both find the path free -- deduplication only consults the filesystem -- and race
-    /// to publish it at the end. Held only for the resolve and the reservation, never across the
-    /// download itself.
-    /// </remarks>
-    private static readonly object _reservationLock = new();
-
     /// <summary>Cap on how long ffprobe may spend measuring the duration.</summary>
     private static readonly TimeSpan _probeTimeout = TimeSpan.FromSeconds(60);
 
@@ -59,6 +38,7 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
 
     private readonly IMediaEncoder _mediaEncoder;
     private readonly IDownloadQueueService _queue;
+    private readonly OutputFilePublisher _publisher;
     private readonly ILogger<FfmpegDownloader> _logger;
 
     /// <summary>
@@ -66,14 +46,17 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
     /// </summary>
     /// <param name="mediaEncoder">Supplies the ffmpeg and ffprobe paths the server already uses.</param>
     /// <param name="queue">Receives live progress updates.</param>
+    /// <param name="publisher">Reserves the output name and publishes the finished file.</param>
     /// <param name="logger">The logger.</param>
     public FfmpegDownloader(
         IMediaEncoder mediaEncoder,
         IDownloadQueueService queue,
+        OutputFilePublisher publisher,
         ILogger<FfmpegDownloader> logger)
     {
         _mediaEncoder = mediaEncoder;
         _queue = queue;
+        _publisher = publisher;
         _logger = logger;
     }
 
@@ -102,7 +85,7 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
                 "The server has not reported an ffmpeg path yet. Check the ffmpeg configuration in Dashboard > Playback.");
         }
 
-        var (finalPath, tempPath) = ReserveOutputPath(config, job.RequestedFileName);
+        var (finalPath, tempPath) = _publisher.ReserveOutputPath(config.OutputDirectory, job.RequestedFileName);
 
         try
         {
@@ -132,152 +115,13 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
             // Only the probe and the download can leave a file that is genuinely partial. Once
             // ffmpeg has exited zero the .part holds a complete download, so publishing is
             // deliberately outside this catch -- see the remarks.
-            TryDelete(tempPath);
+            _publisher.TryDelete(tempPath);
             throw;
         }
 
         // Only publish the finished name once ffmpeg has succeeded, so a partial file is never
         // picked up by a library scan.
-        return PublishFinishedFile(config, job.RequestedFileName, tempPath, finalPath);
-    }
-
-    /// <summary>
-    /// Picks the output path and claims it before anything is downloaded.
-    /// </summary>
-    /// <param name="config">Current plugin settings.</param>
-    /// <param name="requestedFileName">The name the job asked for.</param>
-    /// <returns>The final path and the temporary path now reserved for it.</returns>
-    /// <remarks>
-    /// The empty <c>.part</c> file is the reservation itself, and it is created immediately rather
-    /// than left to ffmpeg: the probe runs first and may take a minute, which is ample time for a
-    /// second download of the same name to pick the same path. Passing a predicate that also sees
-    /// <c>.part</c> files is what makes an in-flight download visible to the next one.
-    /// </remarks>
-    private static (string FinalPath, string TempPath) ReserveOutputPath(PluginConfiguration config, string requestedFileName)
-    {
-        lock (_reservationLock)
-        {
-            var finalPath = OutputPathResolver.Resolve(
-                config.OutputDirectory,
-                requestedFileName,
-                path => File.Exists(path) || File.Exists(path + PartExtension));
-
-            Directory.CreateDirectory(Path.GetDirectoryName(finalPath)!);
-
-            var tempPath = finalPath + PartExtension;
-
-            // ffmpeg is invoked with -y, so the empty placeholder is simply overwritten.
-            File.Create(tempPath).Dispose();
-
-            return (finalPath, tempPath);
-        }
-    }
-
-    /// <summary>
-    /// Moves a finished download onto its final name, working around a name taken since it started.
-    /// </summary>
-    /// <param name="config">Current plugin settings.</param>
-    /// <param name="requestedFileName">The name the job asked for.</param>
-    /// <param name="tempPath">The completed <c>.part</c> file.</param>
-    /// <param name="finalPath">The name reserved when the download began.</param>
-    /// <returns>Where the file actually landed.</returns>
-    private string PublishFinishedFile(PluginConfiguration config, string requestedFileName, string tempPath, string finalPath)
-    {
-        string destination;
-
-        // Held across the move as well as the resolve: picking a replacement name and taking it are
-        // one step here, exactly as they are when the name is first reserved.
-        try
-        {
-            lock (_reservationLock)
-            {
-                destination = Publish(
-                    config.OutputDirectory,
-                    requestedFileName,
-                    tempPath,
-                    finalPath,
-                    File.Exists,
-                    (from, to) => File.Move(from, to, overwrite: false));
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // The download itself succeeded, so say plainly where the finished bytes are: the job
-            // will retry and re-download, but this file can simply be renamed instead.
-            _logger.LogError(
-                ex,
-                "The download finished but could not be published to {Destination}. The complete file is at {TempPath}; rename it by hand to keep it, or it will be swept on the next server restart",
-                finalPath,
-                tempPath);
-            throw;
-        }
-
-        if (!string.Equals(destination, finalPath, StringComparison.Ordinal))
-        {
-            _logger.LogWarning(
-                "{Reserved} was taken while the download was running; published to {Destination} instead",
-                finalPath,
-                destination);
-        }
-
-        return destination;
-    }
-
-    /// <summary>
-    /// Moves a finished download onto its reserved name, resolving a fresh one if it was taken.
-    /// </summary>
-    /// <param name="outputRoot">The configured output directory.</param>
-    /// <param name="requestedFileName">The name the job asked for.</param>
-    /// <param name="tempPath">The completed <c>.part</c> file to move.</param>
-    /// <param name="finalPath">The name reserved when the download began.</param>
-    /// <param name="fileExists">Existence predicate; production passes <see cref="File.Exists(string)"/>.</param>
-    /// <param name="move">Performs the move, failing if the destination exists.</param>
-    /// <returns>Where the file actually landed.</returns>
-    /// <remarks>
-    /// The <c>.part</c> reservation makes a collision with another job impossible, but nothing stops
-    /// a person or another program from creating the file during what may be a multi-hour download.
-    /// Failing there would delete the finished download and start it over, so a fresh name is
-    /// resolved and the move retried -- exactly what deduplication would have done had the file
-    /// existed when the job started.
-    ///
-    /// The filesystem is injected for the same reason it is in <see cref="OutputPathResolver"/>: the
-    /// interesting behaviour is the retry, and it should be assertable without a real disk.
-    ///
-    /// An <see cref="IOException"/> that is not a collision -- and one that outlives
-    /// <see cref="PublishAttempts"/> tries -- propagates. The caller leaves the finished
-    /// <c>.part</c> in place rather than discarding it.
-    /// </remarks>
-    public static string Publish(
-        string outputRoot,
-        string requestedFileName,
-        string tempPath,
-        string finalPath,
-        Func<string, bool> fileExists,
-        Action<string, string> move)
-    {
-        ArgumentNullException.ThrowIfNull(fileExists);
-        ArgumentNullException.ThrowIfNull(move);
-
-        var destination = finalPath;
-
-        for (var attempt = 1; ; attempt++)
-        {
-            try
-            {
-                move(tempPath, destination);
-                return destination;
-            }
-            catch (IOException) when (attempt < PublishAttempts && fileExists(destination))
-            {
-                destination = OutputPathResolver.Resolve(
-                    outputRoot,
-                    requestedFileName,
-                    // Our own .part is not a collision: it is the file being published.
-                    path => (!string.Equals(path + PartExtension, tempPath, StringComparison.Ordinal)
-                            && fileExists(path + PartExtension))
-                        || fileExists(path));
-            }
-        }
+        return _publisher.PublishFinishedFile(config.OutputDirectory, job.RequestedFileName, tempPath, finalPath);
     }
 
     /// <summary>
@@ -824,25 +668,6 @@ public sealed class FfmpegDownloader : IFfmpegDownloader
         catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or SystemException)
         {
             _logger.LogDebug(ex, "Could not kill the ffmpeg process; it likely already exited");
-        }
-    }
-
-    /// <summary>
-    /// Deletes a partial file, ignoring failures.
-    /// </summary>
-    /// <param name="path">The file to remove.</param>
-    private void TryDelete(string path)
-    {
-        try
-        {
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            _logger.LogWarning(ex, "Could not remove the partial download at {Path}", path);
         }
     }
 }

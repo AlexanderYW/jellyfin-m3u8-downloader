@@ -25,6 +25,10 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<DownloadQueueService>();
         serviceCollection.AddSingleton<IDownloadQueueService>(sp => sp.GetRequiredService<DownloadQueueService>());
 
+        // Singleton so its reservation lock covers every download in the server: two jobs
+        // resolving the same output name must not both find it free.
+        serviceCollection.AddSingleton<OutputFilePublisher>();
+
         serviceCollection.AddSingleton<FfmpegDownloader>();
         serviceCollection.AddSingleton<IFfmpegDownloader>(sp => sp.GetRequiredService<FfmpegDownloader>());
 

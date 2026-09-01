@@ -243,7 +243,7 @@ public sealed class QueueWorker : BackgroundService
         {
             foreach (var path in Directory.EnumerateFiles(
                 config.OutputDirectory,
-                "*" + OutputPathResolver.Extension + FfmpegDownloader.PartExtension,
+                "*" + OutputPathResolver.Extension + OutputFilePublisher.PartExtension,
                 SearchOption.AllDirectories))
             {
                 try
