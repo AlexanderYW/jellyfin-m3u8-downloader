@@ -146,11 +146,13 @@ jobs:
             --repo-url "${{ github.server_url }}/${{ github.repository }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- manifest.json; then
+          # Stage first: `git diff` reports no change for an untracked file, so the very
+          # first release — the one that creates manifest.json — would look like a no-op.
+          git add manifest.json
+          if git diff --cached --quiet -- manifest.json; then
             echo "manifest.json unchanged"
             exit 0
           fi
-          git add manifest.json
           # [skip ci] is belt and braces: pushes made with GITHUB_TOKEN do not retrigger workflows.
           git commit -m "chore(release): publish ${{ steps.next.outputs.version4 }} to the plugin manifest [skip ci]"
           git push origin HEAD:"${{ github.event.repository.default_branch }}"

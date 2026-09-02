@@ -1,0 +1,22 @@
+[
+    {
+        "guid": "6f0f4a1e-6c4e-4d2a-9f3b-1c8a5d7e2b40",
+        "name": "M3U8 Downloader",
+        "description": "Queue HLS (.m3u8) URLs in bulk with the output filenames you want, and have Jellyfin remux them to MKV one at a time in the background using the server's own ffmpeg. The queue survives restarts and retries failed downloads.",
+        "overview": "Bulk-download m3u8 streams to MKV files.",
+        "owner": "alexanderwennerstrom",
+        "category": "General",
+        "imageUrl": "https://github.com/AlexanderYW/jellyfin-m3u8-downloader/raw/main/logo.png",
+        "versions": [
+            {
+                "version": "0.1.0.0",
+                "changelog": "### Features\n- guard against host IP bans during downloads ([4dde265](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/4dde265a85d9fbbb679888838e7f2f0330dffc1d))\n\n### Bug Fixes\n- reuse a successful probe across automatic retries ([e796347](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/e796347525d81aa4f82accfcdfa8ee7a62d6790d))\n- quieten shutdown and sanitise request headers ([2deb6eb](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/2deb6eb1e5a4a705540f4f39f94524b7944ef24e))\n- escalate and jitter the host backoff after a rate limit ([889236e](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/889236e6ed98180475b181a3c5476d71be8fa1bc))\n- only treat an HTTP status in context as a rate limit ([9f616e5](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/9f616e52319335f10e46e5d83ed3c2d8b43919b6))",
+                "targetAbi": "10.11.0.0",
+                "sourceUrl": "https://github.com/AlexanderYW/jellyfin-m3u8-downloader/releases/download/v0.1.0/Jellyfin.Plugin.M3u8Downloader_0.1.0.0.zip",
+                "checksum": "78c6210ce06fd8a75a960b6f50167e00",
+                "timestamp": "2026-09-01T19:43:27Z",
+                "repositoryUrl": "https://github.com/AlexanderYW/jellyfin-m3u8-downloader"
+            }
+        ]
+    }
+]
