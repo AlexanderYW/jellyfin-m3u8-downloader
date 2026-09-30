@@ -425,9 +425,5 @@ public sealed class QueueWorkerTests : IDisposable
         public void Stop()
         {
         }
-
-        public void Dispose()
-        {
-        }
     }
 }

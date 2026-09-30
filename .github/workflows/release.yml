@@ -52,7 +52,7 @@ jobs:
         if: steps.next.outputs.release == 'true'
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '9.0.x'
+          dotnet-version: '10.0.x'
 
       - name: Stamp version into the build
         if: steps.next.outputs.release == 'true'
@@ -80,7 +80,7 @@ jobs:
           tag="${{ steps.next.outputs.tag }}"
           zip_name="${PLUGIN_NAME}_${v}.zip"
           mkdir -p dist/package
-          cp "$PLUGIN_NAME/bin/Release/net9.0/$PLUGIN_NAME.dll" dist/package/
+          cp "$PLUGIN_NAME/bin/Release/net10.0/$PLUGIN_NAME.dll" dist/package/
           # Jellyfin unpacks the zip straight into the plugin directory, so no top-level folder.
           (cd dist/package && zip -r "../$zip_name" .)
           checksum="$(md5sum "dist/$zip_name" | cut -d' ' -f1)"
