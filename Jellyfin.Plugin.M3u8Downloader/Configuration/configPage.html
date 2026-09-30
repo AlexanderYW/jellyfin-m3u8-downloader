@@ -50,6 +50,17 @@
             color: var(--theme-primary-color, #00a4dc);
         }
 
+        #M3u8DownloaderConfigPage .m3uPathRow {
+            display: flex;
+            align-items: center;
+            gap: 0.25em;
+        }
+
+        #M3u8DownloaderConfigPage .m3uPathRow > div {
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+
         #M3u8DownloaderConfigPage .m3uCard {
             padding: 0.9em 1.1em;
             margin-bottom: 1.5em;
@@ -291,11 +302,20 @@
                 <h2>Add downloads</h2>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="DestinationFolder" label="Destination folder (optional)" />
+                    <div class="m3uPathRow">
+                        <div>
+                            <input is="emby-input" type="text" id="DestinationFolder" label="Destination folder (optional)" />
+                        </div>
+                        <button is="paper-icon-button-light" type="button" id="BrowseDestinationFolderButton"
+                                class="emby-input-iconbutton" title="Browse" aria-label="Browse for a destination folder">
+                            <span class="material-icons" aria-hidden="true">folder_open</span>
+                        </button>
+                    </div>
                     <div class="fieldDescription">
                         Relative to the output directory, applied to every line below &mdash; for example
-                        <code>Shows/Breaking Bad/Season 01</code>. Leave blank to write straight into the
-                        output directory.
+                        <code>Shows/Breaking Bad/Season 01</code>. Browse to pick an existing folder, or
+                        type one that does not exist yet and it is created with the first download.
+                        Leave blank to write straight into the output directory.
                     </div>
                 </div>
 
@@ -367,7 +387,15 @@
             <div class="m3uTabContent" data-tab-content="settings" style="display:none;">
                 <form id="M3u8DownloaderConfigForm">
                     <div class="inputContainer">
-                        <input is="emby-input" type="text" id="OutputDirectory" label="Output directory" required />
+                        <div class="m3uPathRow">
+                            <div>
+                                <input is="emby-input" type="text" id="OutputDirectory" label="Output directory" required />
+                            </div>
+                            <button is="paper-icon-button-light" type="button" id="BrowseOutputDirectoryButton"
+                                    class="emby-input-iconbutton" title="Browse" aria-label="Browse for the output directory">
+                                <span class="material-icons" aria-hidden="true">folder_open</span>
+                            </button>
+                        </div>
                         <div class="fieldDescription">
                             Absolute path on the server where downloads are written. Files are always
                             saved as <code>.mkv</code>.
@@ -1128,6 +1156,92 @@
                     outputDirectory && outputDirectory.trim() ? 'none' : 'flex';
             }
 
+            // Jellyfin's own folder picker, the one the library editor uses. jellyfin-web puts it on
+            // the global Dashboard object; a client that does not gets a message rather than a
+            // dead button, and the field is still there to type into.
+            function showFolderPicker(options, onPicked) {
+                if (!window.Dashboard || !Dashboard.DirectoryBrowser) {
+                    toast('The folder browser is not available here; type the path instead.');
+                    return;
+                }
+                var picker = new Dashboard.DirectoryBrowser();
+                picker.show({
+                    header: options.header,
+                    path: options.path || '',
+                    includeFiles: false,
+                    validateWriteable: true,
+                    callback: function (path) {
+                        if (path) {
+                            onPicked(path);
+                        }
+                        picker.close();
+                    }
+                });
+            }
+
+            function trimSlashes(path) {
+                return path.replace(/\\/g, '/').replace(/\/+$/, '');
+            }
+
+            // The picker hands back an absolute path, while the destination folder is relative to
+            // the output directory. Null means the pick lies outside it.
+            function relativeToOutput(base, picked) {
+                var root = trimSlashes(base);
+                var target = trimSlashes(picked);
+                // Windows paths are case-insensitive; everything else is compared exactly.
+                var fold = /^[a-z]:/i.test(root)
+                    ? function (s) { return s.toLowerCase(); }
+                    : function (s) { return s; };
+                if (fold(target) === fold(root)) {
+                    return '';
+                }
+                if (fold(target).indexOf(fold(root) + '/') !== 0) {
+                    return null;
+                }
+                return target.substring(root.length + 1);
+            }
+
+            function joinOutputPath(base, relative) {
+                if (!relative) {
+                    return base;
+                }
+                var sep = base.indexOf('\\') >= 0 && base.indexOf('/') < 0 ? '\\' : '/';
+                return base.replace(/[\\/]+$/, '') + sep + relative.replace(/^[\\/]+/, '').replace(/[\\/]/g, sep);
+            }
+
+            function browseOutputDirectory() {
+                var input = page.querySelector('#OutputDirectory');
+                showFolderPicker({
+                    header: 'Select output directory',
+                    path: input.value.trim()
+                }, function (path) {
+                    input.value = path;
+                });
+            }
+
+            function browseDestinationFolder() {
+                // Measured against the saved setting, not the Settings field: an unsaved edit there
+                // is not where the queue will actually write.
+                var base = (settings.OutputDirectory || '').trim();
+                if (!base) {
+                    toast('Set and save an output directory first.');
+                    return;
+                }
+                var input = page.querySelector('#DestinationFolder');
+                showFolderPicker({
+                    header: 'Select destination folder',
+                    path: joinOutputPath(base, input.value.trim())
+                }, function (path) {
+                    var relative = relativeToOutput(base, path);
+                    if (relative === null) {
+                        toast('Pick a folder inside the output directory (' + base + ').');
+                        return;
+                    }
+                    input.value = relative;
+                    writeStored(FOLDER_KEY, relative);
+                });
+            }
+
             function loadConfiguration() {
                 ApiClient.getPluginConfiguration(pluginId).then(function (config) {
                     settings = config;
@@ -1284,6 +1398,9 @@
                 selectTab('settings');
                 page.querySelector('#OutputDirectory').focus();
             });
+
+            page.querySelector('#BrowseOutputDirectoryButton').addEventListener('click', browseOutputDirectory);
+            page.querySelector('#BrowseDestinationFolderButton').addEventListener('click', browseDestinationFolder);
 
             page.querySelector('#QueueList').addEventListener('click', function (e) {
                 var copyPath = e.target.closest('.btnCopyPath');

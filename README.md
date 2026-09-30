@@ -165,8 +165,9 @@ It then appears under **Dashboard → Plugins**.
 
 ### 6. Point it at a writable output directory
 
-Dashboard → Plugins → **M3U8 Downloader** → **Settings** tab → *Output directory*. Two things
-to get right:
+Dashboard → Plugins → **M3U8 Downloader** → **Settings** tab → *Output directory*. Type the path,
+or use the folder button beside the field to pick it with Jellyfin's own folder browser, which also
+warns you if the server cannot write there. Two things to get right:
 
 - The directory must be **writable by the user Jellyfin runs as**, or every job fails with a
   permission error. `sudo -u jellyfin test -w /path && echo ok` checks it.
@@ -200,7 +201,9 @@ the Downloads tab shows a banner saying so, with a shortcut to the field.
 
 Optionally set a **destination folder** for the batch — everything you add is written under it,
 relative to the output directory, so a season's worth of episodes does not need the path repeated on
-every line. It is remembered between batches.
+every line. It is remembered between batches. The folder button beside it opens Jellyfin's folder
+browser at the output directory and fills in the relative path; a folder that does not exist yet can
+still be typed, and is created by the first download.
 
 Then paste jobs into the box on the Downloads tab, one per line:
 
