@@ -9,6 +9,15 @@
         "imageUrl": "https://github.com/AlexanderYW/jellyfin-m3u8-downloader/raw/main/logo.png",
         "versions": [
             {
+                "version": "1.0.0.0",
+                "changelog": "### \u26a0 BREAKING CHANGES\n- target Jellyfin 12.1 on .NET 10 ([67ed717](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/67ed717e275c55673a2bd5b9cf764b04e3799766))\n\n### Features\n- target Jellyfin 12.1 on .NET 10 ([67ed717](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/67ed717e275c55673a2bd5b9cf764b04e3799766))",
+                "targetAbi": "12.1.0.0",
+                "sourceUrl": "https://github.com/AlexanderYW/jellyfin-m3u8-downloader/releases/download/v1.0.0/Jellyfin.Plugin.M3u8Downloader_1.0.0.0.zip",
+                "checksum": "c37b23810f5f012a0b919d28a83c3a5d",
+                "timestamp": "2026-09-30T09:49:00Z",
+                "repositoryUrl": "https://github.com/AlexanderYW/jellyfin-m3u8-downloader"
+            },
+            {
                 "version": "0.1.0.0",
                 "changelog": "### Features\n- guard against host IP bans during downloads ([4dde265](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/4dde265a85d9fbbb679888838e7f2f0330dffc1d))\n\n### Bug Fixes\n- reuse a successful probe across automatic retries ([e796347](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/e796347525d81aa4f82accfcdfa8ee7a62d6790d))\n- quieten shutdown and sanitise request headers ([2deb6eb](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/2deb6eb1e5a4a705540f4f39f94524b7944ef24e))\n- escalate and jitter the host backoff after a rate limit ([889236e](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/889236e6ed98180475b181a3c5476d71be8fa1bc))\n- only treat an HTTP status in context as a rate limit ([9f616e5](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/9f616e52319335f10e46e5d83ed3c2d8b43919b6))",
                 "targetAbi": "10.11.0.0",
