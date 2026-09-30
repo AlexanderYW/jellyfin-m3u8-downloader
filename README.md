@@ -10,11 +10,13 @@ A Jellyfin server plugin that downloads HLS (`.m3u8`) streams into `.mkv` files.
   a `Failed` state you can requeue by hand.
 - **No extra dependencies** — uses the `ffmpeg` binary Jellyfin already ships with.
 
-Targets **Jellyfin 10.11.x** (`net9.0`), verified against 10.11.11.
+Targets **Jellyfin 12.1.x** (`net10.0`), verified against 12.1.0. Jellyfin 10.11 servers
+should stay on the [0.1.0 release](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/releases/tag/v0.1.0),
+which is the last build for `net9.0`.
 
 ## Building
 
-Requires the [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0), or Docker (see below).
+Requires the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0), or Docker (see below).
 
 ```bash
 dotnet build -c Release
@@ -72,8 +74,13 @@ on your workstation and copy one file up.
 
 ### 1. Check the server's Jellyfin version
 
-The plugin targets ABI `10.11.0.0` and is built against `Jellyfin.Controller` 10.11.11.
-It will not load on 10.10 or earlier — those need a build against the matching 10.10 packages.
+The plugin targets ABI `12.1.0.0` and is built against `Jellyfin.Controller` 12.1.0.
+It will not load on 12.0 or earlier. Jellyfin 12 moved the server to .NET 10, so a plugin built for
+an older release has to be rebuilt against that release's packages — 10.11 servers should use the
+0.1.0 release linked above.
+
+Coming from 10.11? Jellyfin's 12.0 release notes recommend removing repository-installed plugins
+before migrating and re-adding them afterwards.
 
 ```bash
 curl -s http://YOUR_SERVER:8096/System/Info/Public | grep -o '"Version":"[^"]*"'
@@ -85,10 +92,10 @@ curl -s http://YOUR_SERVER:8096/System/Info/Public | grep -o '"Version":"[^"]*"'
 dotnet publish Jellyfin.Plugin.M3u8Downloader -c Release -o ./artifacts
 ```
 
-No local .NET 9 SDK? Build in a container instead — same output, and it needs nothing installed:
+No local .NET 10 SDK? Build in a container instead — same output, and it needs nothing installed:
 
 ```bash
-docker run --rm -v "$PWD:/src" -w /src mcr.microsoft.com/dotnet/sdk:9.0 dotnet publish Jellyfin.Plugin.M3u8Downloader -c Release -o /src/artifacts
+docker run --rm -v "$PWD:/src" -w /src mcr.microsoft.com/dotnet/sdk:10.0 dotnet publish Jellyfin.Plugin.M3u8Downloader -c Release -o /src/artifacts
 ```
 
 Then copy it up:
@@ -484,17 +491,17 @@ Output names are claimed before the download starts rather than when ffmpeg open
 probe alone can take a minute, which is long enough for a second job with the same name to pick the
 same path. The empty `.part` file is the claim, and it is visible to the next job's deduplication.
 
-> **Subtitles and the bundled ffmpeg.** Jellyfin's bundled ffmpeg does not surface subtitle
-> renditions from a *master* playlist. Measured on Apple's test stream, both 10.10's ffmpeg 7.0.2
-> and 10.11's ffmpeg 7.1.4 report **17 streams with no subtitles**, where ffmpeg 9.0.1 reports 25
-> including 8 WebVTT tracks. WebVTT itself is fully supported in those builds — they read a
-> subtitle rendition playlist directly without trouble — so this is an HLS demuxer limitation, not
-> a missing codec, and nothing the plugin does can map streams ffmpeg never exposes.
+> **Subtitles and the bundled ffmpeg.** Subtitle renditions from a *master* playlist need a recent
+> ffmpeg. Measured on Apple's test stream (`bipbop_16x9/bipbop_16x9_variant.m3u8`), 10.10's ffmpeg
+> 7.0.2 and 10.11's ffmpeg 7.1.4 report **17 streams with no subtitles**. The ffmpeg 8.1.2 bundled
+> with **Jellyfin 12.1 reports 25, including 8 WebVTT tracks**, and a download through this plugin
+> on 12.1 keeps all of them: 1 video, 2 audio and 8 subtitle tracks (the *best program* row above).
+> The older builds read a subtitle rendition playlist directly without trouble, so that was an HLS
+> demuxer limitation, not a missing codec.
 >
-> The plugin already maps everything ffmpeg exposes, so subtitles will start coming through on
-> their own once Jellyfin bundles a newer ffmpeg. **Audio tracks are unaffected and all preserved
-> today.** To get subtitles sooner, the source's subtitle renditions have to be fetched as
-> separate inputs and muxed in — see the note in the issue tracker.
+> The plugin maps everything ffmpeg exposes, so this needs nothing from you on 12.1. Servers still
+> on 10.11 (plugin 0.1.0) keep the old behaviour: **audio tracks are unaffected and all preserved**,
+> but subtitle renditions from a master playlist never reach the plugin.
 
 Each download is written to a `.part` file and moved into place only on success, so a partial file
 is never picked up by a library scan and a failure leaves nothing behind.
