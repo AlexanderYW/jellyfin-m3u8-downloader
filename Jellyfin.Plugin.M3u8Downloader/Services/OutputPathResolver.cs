@@ -28,6 +28,39 @@ public static class OutputPathResolver
     private static readonly char[] _separators = { '/', '\\' };
 
     /// <summary>
+    /// Video, container and playlist extensions that <see cref="ForceExtension"/> replaces.
+    /// </summary>
+    /// <remarks>
+    /// An allowlist rather than a shape test: the "1" in "Smoke Test 12.1" or the "2049" in
+    /// "Blade.Runner.2049" look exactly like a short extension, so the only reliable signal is
+    /// whether the ending is a media type someone would actually type. <c>.mkv</c> is absent
+    /// because a name that already ends in it is returned before this set is consulted.
+    /// </remarks>
+    private static readonly HashSet<string> _replaceableExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".3gp",
+        ".asf",
+        ".avi",
+        ".divx",
+        ".f4v",
+        ".flv",
+        ".m2ts",
+        ".m3u",
+        ".m3u8",
+        ".m4v",
+        ".mov",
+        ".mp4",
+        ".mpeg",
+        ".mpg",
+        ".mts",
+        ".ogv",
+        ".ts",
+        ".vob",
+        ".webm",
+        ".wmv",
+    };
+
+    /// <summary>
     /// Resolves a requested filename to an absolute path under <paramref name="outputRoot"/>.
     /// </summary>
     /// <param name="outputRoot">The configured output directory.</param>
@@ -138,8 +171,19 @@ public static class OutputPathResolver
     }
 
     /// <summary>
-    /// Replaces any existing extension with the MKV container extension.
+    /// Gives the final segment the MKV container extension, replacing a recognised video or
+    /// playlist extension instead of stacking a second one after it.
     /// </summary>
+    /// <remarks>
+    /// Only the extensions in <see cref="_replaceableExtensions"/> are replaced, compared
+    /// case-insensitively, so <c>episode.mp4</c> becomes <c>episode.mkv</c>. Every other dotted
+    /// ending is treated as part of the title and kept, with <c>.mkv</c> appended:
+    /// <c>Smoke Test 12.1</c> becomes <c>Smoke Test 12.1.mkv</c> and <c>Blade.Runner.2049</c>
+    /// becomes <c>Blade.Runner.2049.mkv</c>. A name that already ends in <c>.mkv</c> is returned
+    /// unchanged. The cost of the allowlist is that an unlisted real extension (<c>episode.xyz</c>)
+    /// ends up as <c>episode.xyz.mkv</c>, which is visible and easy to correct; dropping part of a
+    /// title is neither, and can also make two different requested names share one output file.
+    /// </remarks>
     /// <param name="fileName">The final path segment.</param>
     /// <returns>The segment with an <c>.mkv</c> extension.</returns>
     private static string ForceExtension(string fileName)
@@ -149,11 +193,7 @@ public static class OutputPathResolver
             return fileName;
         }
 
-        var existing = Path.GetExtension(fileName);
-
-        // Only strip something that actually looks like an extension. This keeps names such as
-        // "Movie (2019). Directors Cut" from losing their tail.
-        if (existing.Length is > 1 and <= 5 && existing.AsSpan(1).ToString().All(char.IsLetterOrDigit))
+        if (_replaceableExtensions.Contains(Path.GetExtension(fileName)))
         {
             fileName = Path.GetFileNameWithoutExtension(fileName);
         }

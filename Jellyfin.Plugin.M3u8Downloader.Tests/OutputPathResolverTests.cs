@@ -29,6 +29,44 @@ public class OutputPathResolverTests
         Assert.Equal(Path.Combine(_root, "episode.mkv"), Resolve("episode.mp4"));
     }
 
+    [Theory]
+    [InlineData("episode.mp4", "episode.mkv")]
+    [InlineData("episode.MP4", "episode.mkv")]
+    [InlineData("episode.ts", "episode.mkv")]
+    [InlineData("episode.m3u8", "episode.mkv")]
+    [InlineData("episode.avi", "episode.mkv")]
+    [InlineData("episode.mov", "episode.mkv")]
+    [InlineData("episode.webm", "episode.mkv")]
+    [InlineData("Blade.Runner.2049.mp4", "Blade.Runner.2049.mkv")]
+    public void Resolve_ReplacesRecognisedVideoExtensions(string name, string expected)
+    {
+        Assert.Equal(Path.Combine(_root, expected), Resolve(name));
+    }
+
+    [Theory]
+    [InlineData("Smoke Test 12.1", "Smoke Test 12.1.mkv")]
+    [InlineData("Blade.Runner.2049", "Blade.Runner.2049.mkv")]
+    [InlineData("Show S01.E05", "Show S01.E05.mkv")]
+    [InlineData("Movie 2.0", "Movie 2.0.mkv")]
+    public void Resolve_KeepsADottedTailThatIsNotAMediaExtension(string name, string expected)
+    {
+        // A short alphanumeric ending after a dot looks like an extension but is part of the
+        // title; stripping it would turn "Smoke Test 12.1" into "Smoke Test 12".
+        Assert.Equal(Path.Combine(_root, expected), Resolve(name));
+    }
+
+    [Fact]
+    public void Resolve_DoesNotCollapseNamesThatDifferOnlyInADottedTail()
+    {
+        // Dropping the tail used to map both of these onto "Smoke Test 12.mkv", so the second
+        // download was silently renamed to "Smoke Test 12 (2).mkv".
+        var first = Resolve("Smoke Test 12.1");
+        var second = Resolve("Smoke Test 12.2");
+
+        Assert.NotEqual(first, second);
+        Assert.Equal(Path.Combine(_root, "Smoke Test 12.2.mkv"), second);
+    }
+
     [Fact]
     public void Resolve_KeepsExistingMkvExtension()
     {

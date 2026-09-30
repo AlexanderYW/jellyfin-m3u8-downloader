@@ -213,7 +213,10 @@ https://example.com/derives-a-name-from-the-url.m3u8
 ```
 
 - The part after `|` is the output name and is optional; without it, a name is derived from the URL.
-- The `.mkv` extension is added automatically (and any other extension is replaced).
+- The `.mkv` extension is added automatically. A common video or playlist extension you type
+  (`.mp4`, `.ts`, `.m3u8`, `.avi`, `.mov`, `.webm`, …) is replaced rather than kept, so
+  `episode.mp4` is saved as `episode.mkv`. Any other dotted ending is treated as part of the name:
+  `Smoke Test 12.1` is saved as `Smoke Test 12.1.mkv`, not `Smoke Test 12.mkv`.
 - Subfolders are allowed and are created as needed. Names are always resolved inside the configured
   output directory: `..` segments are stripped (so `../../etc/x` lands at `<output>/etc/x.mkv`) and
   absolute paths are rejected outright.
