@@ -9,6 +9,15 @@
         "imageUrl": "https://github.com/AlexanderYW/jellyfin-m3u8-downloader/raw/main/logo.png",
         "versions": [
             {
+                "version": "1.1.0.0",
+                "changelog": "### Features\n- config: pick output and destination folders with Jellyfin's folder browser ([362245a](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/362245a490b0f61d7d4798f0246829e7d128dd92))\n\n### Bug Fixes\n- stop stripping dotted title tails that are not media extensions ([62c4662](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/62c46623773926bc38b9c3516af1ae4622adc403))",
+                "targetAbi": "12.1.0.0",
+                "sourceUrl": "https://github.com/AlexanderYW/jellyfin-m3u8-downloader/releases/download/v1.1.0/Jellyfin.Plugin.M3u8Downloader_1.1.0.0.zip",
+                "checksum": "0cb53edbfbfb9e6b45bda9077dfd82b8",
+                "timestamp": "2026-09-30T19:49:06Z",
+                "repositoryUrl": "https://github.com/AlexanderYW/jellyfin-m3u8-downloader"
+            },
+            {
                 "version": "1.0.0.0",
                 "changelog": "### \u26a0 BREAKING CHANGES\n- target Jellyfin 12.1 on .NET 10 ([67ed717](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/67ed717e275c55673a2bd5b9cf764b04e3799766))\n\n### Features\n- target Jellyfin 12.1 on .NET 10 ([67ed717](https://github.com/AlexanderYW/jellyfin-m3u8-downloader/commit/67ed717e275c55673a2bd5b9cf764b04e3799766))",
                 "targetAbi": "12.1.0.0",
